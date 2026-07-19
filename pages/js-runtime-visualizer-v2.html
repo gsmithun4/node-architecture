@@ -1,0 +1,1984 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The JavaScript Runtime — Execution &amp; Ownership</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --paper:#E6E8E3; --panel:#FAFAF8; --panel-2:#F1F2EE;
+    --ink:#191D1E; --ink-2:#5C6461; --ink-3:#8E9591; --rule:#CBD0C8;
+    --sync:#191D1E; --micro:#6D4AC7; --macro:#0E6E63; --tick:#B03A3A;
+    --check:#B4740A; --dormant:#9AA29D;
+    --shadow:0 1px 0 rgba(25,29,30,.06), 0 2px 8px rgba(25,29,30,.05);
+    --accent:#0E6E63;
+    --mono:'IBM Plex Mono',ui-monospace,monospace;
+    --disp:'Space Grotesk',system-ui,sans-serif;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0}
+  body{
+    background:var(--paper);
+    background-image:linear-gradient(var(--rule) 1px,transparent 1px),linear-gradient(90deg,var(--rule) 1px,transparent 1px);
+    background-size:28px 28px; background-position:-1px -1px;
+    color:var(--ink); font-family:var(--disp); -webkit-font-smoothing:antialiased; padding:18px;
+  }
+  .wrap{max-width:1320px;margin:0 auto}
+
+  header{display:flex;flex-wrap:wrap;gap:16px;align-items:flex-end;justify-content:space-between;
+    padding-bottom:14px;border-bottom:1.5px solid var(--ink)}
+  h1{font-size:clamp(19px,2.4vw,27px);font-weight:700;letter-spacing:-.02em;margin:0;line-height:1.05}
+  h1 em{font-style:normal;color:var(--ink-3)}
+  .sub{font-family:var(--mono);font-size:11px;color:var(--ink-2);margin-top:5px;letter-spacing:.02em}
+
+  .controls{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  select,button,textarea{font-family:var(--mono);font-size:12px;color:var(--ink);
+    background:var(--panel);border:1.5px solid var(--ink);border-radius:2px;padding:7px 11px;
+    transition:transform .08s ease, background .12s ease}
+  select,button{cursor:pointer}
+  button:hover:not(:disabled){background:var(--ink);color:var(--panel)}
+  button:active:not(:disabled){transform:translateY(1px)}
+  button:disabled{opacity:.35;cursor:not-allowed}
+  button.primary{background:var(--ink);color:var(--panel)}
+  button.primary:hover{background:#000}
+  :focus-visible{outline:2.5px solid var(--micro);outline-offset:2px}
+
+  .seg{display:flex;border:1.5px solid var(--ink);border-radius:2px;overflow:hidden}
+  .seg button{border:0;border-radius:0;background:var(--panel)}
+  .seg button+button{border-left:1.5px solid var(--ink)}
+  .seg button[aria-pressed="true"]{background:var(--ink);color:var(--panel)}
+
+  .tabs{display:flex;margin:14px 0;border-bottom:1.5px solid var(--ink)}
+  .tab{font-family:var(--mono);font-size:11.5px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;
+    background:transparent;border:1.5px solid transparent;border-bottom:0;border-radius:2px 2px 0 0;
+    padding:9px 16px;margin-bottom:-1.5px;color:var(--ink-2)}
+  .tab:hover{background:transparent;color:var(--ink)}
+  .tab[aria-selected="true"]{background:var(--panel);border-color:var(--ink);color:var(--ink)}
+  .tab small{display:block;font-size:9px;font-weight:400;letter-spacing:.02em;text-transform:none;color:var(--ink-3);margin-top:1px}
+  .tab[aria-selected="true"] small{color:var(--ink-2)}
+
+  .narrate{display:flex;gap:12px;align-items:center;background:var(--ink);color:#F2F3F0;border-radius:2px;
+    padding:11px 14px;margin-bottom:14px;min-height:46px}
+  .stepno{font-family:var(--mono);font-size:11px;font-weight:600;background:rgba(255,255,255,.12);
+    padding:4px 7px;border-radius:2px;white-space:nowrap}
+  .narrate p{margin:0;font-size:13.5px;line-height:1.45}
+  .narrate b{font-weight:600;border-bottom:1.5px solid rgba(255,255,255,.45)}
+  .narrate.err{background:var(--tick)}
+
+  .grid{display:grid;grid-template-columns:minmax(0,1.05fr) minmax(0,.85fr) minmax(0,1.1fr);gap:14px;align-items:start}
+  .col{display:flex;flex-direction:column;gap:14px;min-width:0}
+
+  .card{background:var(--panel);border:1.5px solid var(--ink);border-radius:2px;box-shadow:var(--shadow);overflow:hidden}
+  .card>h2{font-family:var(--mono);font-size:10.5px;font-weight:600;letter-spacing:.1em;text-transform:uppercase;
+    margin:0;padding:8px 11px;border-bottom:1.5px solid var(--ink);
+    display:flex;justify-content:space-between;align-items:center;gap:8px}
+  .card>h2 span{color:var(--ink-3);font-weight:400;letter-spacing:.04em;text-transform:none;font-size:10px}
+  .body{padding:10px 11px}
+  .body.tight{padding:8px}
+
+  pre.code{margin:0;font-family:var(--mono);font-size:12.2px;line-height:1.65;overflow-x:auto}
+  .ln{display:flex;gap:10px;padding:0 6px;border-radius:2px;white-space:pre}
+  .ln .n{color:var(--ink-3);user-select:none;min-width:16px;text-align:right;font-size:11px}
+  .ln.on{background:#FFF3C4;box-shadow:inset 3px 0 0 var(--ink)}
+  .tok-k{color:#8A2E6B}.tok-s{color:#0E6E63}.tok-f{color:#2B4C9B}.tok-c{color:var(--ink-3);font-style:italic}.tok-n{color:#B4740A}
+
+  .scope{border:1.5px solid var(--ink);border-radius:2px;padding:7px 8px;font-family:var(--mono);font-size:11px}
+  .scope.nest{margin-left:12px;margin-top:7px;border-left-width:4px}
+  .scope.closed{border-style:dashed;border-color:var(--micro);
+    background:repeating-linear-gradient(45deg,transparent,transparent 5px,rgba(109,74,199,.06) 5px,rgba(109,74,199,.06) 10px)}
+  .scope-h{font-weight:600;font-size:9.5px;letter-spacing:.09em;text-transform:uppercase;color:var(--ink-2);
+    margin-bottom:5px;display:flex;justify-content:space-between;gap:6px}
+  .scope.closed .scope-h{color:var(--micro)}
+  .bind{display:flex;justify-content:space-between;gap:8px;padding:1.5px 0}
+  .bind b{font-weight:500}.bind i{font-style:normal;color:var(--ink-2)}.bind i.tdz{color:var(--tick)}
+  .empty{font-family:var(--mono);font-size:11px;color:var(--ink-3);padding:6px 2px}
+
+  .scope.onchain{border-color:var(--ink);box-shadow:inset 3px 0 0 var(--ink)}
+  .scope.active{background:#FFF3C4;border-color:var(--ink);box-shadow:inset 3px 0 0 var(--ink)}
+  .scope.block{border-style:dotted}
+  .cap{color:var(--micro);font-size:9px;letter-spacing:.05em;margin-left:5px}
+  .scope-note{font-family:var(--mono);font-size:9.5px;color:var(--ink-3);line-height:1.6;margin-top:8px;
+    padding-top:7px;border-top:1px dashed var(--rule)}
+
+  .stack{display:flex;flex-direction:column-reverse;gap:5px;min-height:132px;justify-content:flex-end}
+  .frame{font-family:var(--mono);font-size:11.5px;font-weight:500;border:1.5px solid var(--ink);border-radius:2px;
+    background:var(--panel-2);padding:7px 9px;display:flex;justify-content:space-between;gap:8px;animation:pop .18s ease-out}
+  .frame.top{background:#FFF3C4}
+  .frame small{color:var(--ink-3);font-weight:400}
+  .frame[data-kind="micro"]{border-color:var(--micro);box-shadow:inset 4px 0 0 var(--micro)}
+  .frame[data-kind="macro"]{border-color:var(--macro);box-shadow:inset 4px 0 0 var(--macro)}
+  .frame[data-kind="tick"]{border-color:var(--tick);box-shadow:inset 4px 0 0 var(--tick)}
+  .frame[data-kind="check"]{border-color:var(--check);box-shadow:inset 4px 0 0 var(--check)}
+  @keyframes pop{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+
+  .loop{display:flex;gap:12px;align-items:center}
+  .rotor{flex:0 0 84px}
+  .rotor svg{display:block;width:84px;height:84px}
+  .rotor .arm{transform-origin:50% 50%;animation:spin 2.6s linear infinite;animation-play-state:paused}
+  .rotor.live .arm{animation-play-state:running}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  .phase{font-family:var(--mono);font-size:12px;font-weight:600}
+  .rule-txt{font-family:var(--mono);font-size:10.5px;color:var(--ink-2);line-height:1.5;margin-top:5px}
+  .gate{font-family:var(--mono);font-size:10px;margin-top:6px;padding:3px 6px;border-radius:2px;display:inline-block;border:1.5px solid}
+  .gate.blocked{color:var(--tick);border-color:var(--tick)}
+  .gate.open{color:var(--macro);border-color:var(--macro)}
+
+  .q{padding:8px 9px;border-top:1.5px dashed var(--rule)}
+  .q:first-child{border-top:0}
+  .q-h{display:flex;align-items:center;gap:7px;margin-bottom:6px}
+  .dot{width:9px;height:9px;border-radius:50%;flex:0 0 auto}
+  .q-h b{font-family:var(--mono);font-size:10px;font-weight:600;letter-spacing:.07em;text-transform:uppercase}
+  .q-h small{font-family:var(--mono);font-size:9.5px;color:var(--ink-3);margin-left:auto;letter-spacing:.03em}
+  .lane{display:flex;gap:5px;flex-wrap:wrap;min-height:28px;align-items:center;background:var(--panel-2);
+    border:1.5px dashed var(--rule);border-radius:2px;padding:5px}
+  .lane.hot{border-style:solid;border-color:var(--ink);background:#FFF3C4}
+  .chip{font-family:var(--mono);font-size:10.5px;font-weight:500;padding:4px 7px;border-radius:2px;
+    border:1.5px solid;background:var(--panel);animation:pop .18s ease-out;white-space:nowrap}
+  .chip.sync{border-color:var(--sync);color:var(--sync)}
+  .chip.micro{border-color:var(--micro);color:var(--micro)}
+  .chip.macro{border-color:var(--macro);color:var(--macro)}
+  .chip.tick{border-color:var(--tick);color:var(--tick)}
+  .chip.check{border-color:var(--check);color:var(--check)}
+  .chip.dormant{border-color:var(--dormant);color:var(--dormant);border-style:dashed}
+  .chip em{font-style:normal;opacity:.6}
+
+  .out{background:var(--ink);border-radius:2px;padding:9px 10px;min-height:70px;font-family:var(--mono);
+    font-size:11.5px;line-height:1.75;color:#EDEEEA;max-height:230px;overflow:auto}
+  .out div{animation:pop .18s ease-out}
+  .out div::before{content:'› ';color:var(--dormant)}
+  .out .ph{color:var(--ink-3)}
+  .out .ph::before{content:''}
+  .out .bad{color:#FF9E9E}
+
+  textarea#src{width:100%;min-height:310px;resize:vertical;line-height:1.65;font-size:12.2px;
+    background:var(--panel-2);tab-size:2}
+  .hintbar{font-family:var(--mono);font-size:10px;color:var(--ink-2);margin-top:7px;line-height:1.7}
+  .hintbar code{background:var(--panel-2);border:1px solid var(--rule);border-radius:2px;padding:0 3px}
+  .clock{font-family:var(--mono);font-size:10.5px;color:var(--ink-2);margin-top:8px}
+  .clock b{color:var(--ink)}
+
+  .legend{display:flex;gap:14px;flex-wrap:wrap;margin-top:14px;padding-top:10px;border-top:1.5px solid var(--ink);
+    font-family:var(--mono);font-size:10.5px;color:var(--ink-2)}
+  .legend span{display:flex;align-items:center;gap:5px}
+
+  .site-footer{
+    margin-top:16px;
+    padding-top:10px;
+    border-top:1.5px solid var(--ink);
+    font-family:var(--mono);
+    font-size:10.5px;
+    color:var(--ink-2);
+  }
+  .site-footer a{color:var(--ink);text-decoration-thickness:1.5px}
+
+
+
+  /* ---------- loop phase / step list ---------- */
+  .phaselist{margin-top:10px;padding-top:9px;border-top:1.5px dashed var(--rule)}
+  .phasehead{font-family:var(--mono);font-size:9px;letter-spacing:.08em;text-transform:uppercase;
+    color:var(--ink-3);margin-bottom:6px}
+  .phases{display:flex;flex-direction:column;gap:2px}
+  .ph{font-family:var(--mono);font-size:10.5px;padding:4px 7px;border-radius:2px;border:1.5px solid transparent;
+    display:flex;justify-content:space-between;gap:8px;color:var(--ink-2);align-items:baseline}
+  .ph.on{border-color:var(--accent);background:#fff;color:var(--accent);font-weight:600}
+  .ph small{color:var(--ink-3);font-weight:400;text-align:right}
+  .ph.on small{color:var(--accent);opacity:.7}
+  .ph.done{opacity:.4}
+  .drainband{font-family:var(--mono);font-size:10.5px;padding:4px 7px;border-radius:2px;
+    border:1.5px dashed var(--rule);display:flex;justify-content:space-between;gap:8px;
+    color:var(--ink-3);margin:2px 0}
+  .drainband.on{border-style:solid;border-color:var(--micro);background:#fff;color:var(--micro);font-weight:600}
+  .drainband small{color:inherit;opacity:.7;font-weight:400}
+  .phwrap{font-family:var(--mono);font-size:9px;color:var(--ink-3);margin-top:5px;padding-left:7px}
+
+  /* ---------- ownership layer ---------- */
+  :root{
+    --own-v8:#191D1E; --own-host:#6D4AC7; --own-uv:#0E6E63; --own-kernel:#B03A3A;
+  }
+  .card>h2{position:relative}
+  .info{
+    width:17px;height:17px;flex:0 0 auto;border-radius:50%;
+    border:1.5px solid var(--ink-3);background:transparent;color:var(--ink-3);
+    font-family:var(--mono);font-size:10px;font-weight:700;line-height:1;
+    display:inline-flex;align-items:center;justify-content:center;cursor:pointer;padding:0;
+    transition:all .12s ease;margin-left:2px;
+  }
+  .info:hover,.info[aria-expanded="true"]{background:var(--ink);border-color:var(--ink);color:var(--panel);transform:none}
+  .info[aria-expanded="true"]{background:var(--own,var(--ink));border-color:var(--own,var(--ink))}
+  h2 .spacer{margin-left:auto}
+
+  /* owner strip under each card header */
+  .ownstrip{
+    display:flex;align-items:center;gap:6px;padding:5px 11px;
+    border-bottom:1.5px solid var(--rule);background:var(--panel-2);
+    font-family:var(--mono);font-size:9.5px;letter-spacing:.03em;color:var(--ink-2);
+  }
+  .ownstrip .osw{width:8px;height:8px;border-radius:2px;background:var(--own);flex:0 0 auto}
+  .ownstrip b{color:var(--own);font-weight:600}
+
+  /* popover */
+  .pop-back{position:fixed;inset:0;background:rgba(25,29,30,.34);z-index:60;display:flex;
+    align-items:center;justify-content:center;padding:20px;animation:fade .14s ease-out}
+  @keyframes fade{from{opacity:0}to{opacity:1}}
+  .pop{background:var(--panel);border:1.5px solid var(--ink);border-radius:2px;max-width:660px;width:100%;
+    max-height:86vh;overflow:auto;box-shadow:0 12px 40px rgba(25,29,30,.3);animation:rise .18s ease-out}
+  @keyframes rise{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
+  .pop-h{display:flex;align-items:center;gap:10px;padding:12px 14px;border-bottom:1.5px solid var(--ink);
+    position:sticky;top:0;background:var(--panel);z-index:1}
+  .pop-h h3{margin:0;font-size:16px;font-weight:700;letter-spacing:-.01em}
+  .pop-h .ownpill{font-family:var(--mono);font-size:9.5px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;
+    padding:3px 8px;border-radius:999px;color:#fff;background:var(--own)}
+  .pop-h button{margin-left:auto;border:1.5px solid var(--ink);background:var(--panel);border-radius:2px;
+    font-family:var(--mono);font-size:11px;padding:4px 9px;cursor:pointer}
+  .pop-h button:hover{background:var(--ink);color:var(--panel)}
+  .pop-b{padding:12px 14px}
+  .pop-lede{font-size:13.5px;line-height:1.6;margin:0 0 12px;color:var(--ink)}
+  .pop-lede b{font-weight:600}
+  .ecards{display:grid;grid-template-columns:1fr 1fr;gap:9px}
+  .ec{border:1.5px solid var(--rule);border-radius:2px;background:var(--panel-2);padding:8px 10px}
+  .ec.owns{border-color:var(--ec);border-width:2px;background:var(--panel)}
+  .ec.none{opacity:.55}
+  .ec-h{display:flex;align-items:center;gap:6px;margin-bottom:5px}
+  .ec-h i{width:9px;height:9px;border-radius:2px;background:var(--ec);flex:0 0 auto}
+  .ec-h b{font-size:12px;font-weight:700}
+  .ec-h .st{margin-left:auto;font-family:var(--mono);font-size:8.5px;font-weight:600;letter-spacing:.05em;
+    text-transform:uppercase;padding:1px 6px;border-radius:999px;border:1.5px solid}
+  .ec .st.owns{background:var(--ec);color:#fff;border-color:var(--ec)}
+  .ec .st.helps{color:var(--ec);border-color:var(--ec)}
+  .ec .st.relays,.ec .st.none{color:var(--ink-3);border-color:var(--rule)}
+  .ec ul{margin:0;padding-left:14px}
+  .ec li{font-size:11.5px;line-height:1.5;color:var(--ink-2);margin-bottom:3px}
+  .ec li b{color:var(--ink);font-weight:600}
+  .ec .nn{font-family:var(--mono);font-size:10.5px;color:var(--ink-3);font-style:italic;margin:0}
+  .pop-key{border:1.5px solid var(--ink);background:#FFF3C4;border-radius:2px;padding:9px 11px;margin-top:12px}
+  .pop-key b{display:block;font-family:var(--mono);font-size:9px;letter-spacing:.08em;text-transform:uppercase;margin-bottom:4px}
+  .pop-key p{margin:0;font-size:12.5px;line-height:1.55}
+  .pop code{font-family:var(--mono);font-size:11px;background:var(--panel-2);border:1px solid var(--rule);
+    border-radius:2px;padding:0 3px}
+  @media (max-width:600px){ .ecards{grid-template-columns:1fr} }
+
+  .ownlegend{display:flex;gap:14px;flex-wrap:wrap;align-items:center;margin-top:10px;
+    font-family:var(--mono);font-size:10px;color:var(--ink-2)}
+  .ownlegend i{width:9px;height:9px;border-radius:2px;flex:0 0 auto}
+  .ownlegend span{display:flex;align-items:center;gap:5px}
+
+  [hidden]{display:none!important}
+  @media (max-width:1080px){ .grid{grid-template-columns:1fr 1fr} .col:nth-child(3){grid-column:1/-1} }
+  @media (max-width:720px){
+    body{padding:11px} .grid{grid-template-columns:1fr} .col:nth-child(3){grid-column:auto}
+    header{align-items:flex-start;flex-direction:column}
+  }
+  @media (prefers-reduced-motion:reduce){ *{animation:none!important;transition:none!important} }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <div>
+      <h1>The JavaScript Runtime <em>— step by step</em></h1>
+      <div class="sub">call stack · scope chain · platform APIs · task queues · event loop<br><span style="color:var(--ink-3)">click any <b style="border:1.5px solid var(--ink-3);border-radius:50%;padding:0 4px;font-family:var(--mono);font-size:9px">i</b> to see which engine owns that part — ownership changes with the runtime toggle</span></div>
+    </div>
+    <div class="controls">
+      <div class="seg" role="group" aria-label="Runtime">
+        <button id="rt-browser" aria-pressed="true">Browser</button>
+        <button id="rt-node" aria-pressed="false">Node</button>
+      </div>
+    </div>
+  </header>
+
+  <div class="tabs" role="tablist">
+    <button class="tab" id="tab-guided"  role="tab" aria-selected="true">Guided<small>curated traces · stack &amp; scope</small></button>
+    <button class="tab" id="tab-sandbox" role="tab" aria-selected="false">Sandbox<small>your code · really executed</small></button>
+  </div>
+
+  <!-- ======================= GUIDED ======================= -->
+  <div id="view-guided">
+    <div class="controls" style="margin-bottom:14px">
+      <select id="example" aria-label="Example"></select>
+      <button id="back" title="Step back">←</button>
+      <button id="step" class="primary">Step →</button>
+      <button id="play">Run</button>
+      <button id="reset">Reset</button>
+    </div>
+
+    <div class="narrate">
+      <span class="stepno" id="stepno">0 / 0</span>
+      <p id="note">Pick an example, predict the output out loud, then step through and see if you were right.</p>
+    </div>
+
+    <div class="grid">
+      <div class="col">
+        <section class="card" data-own="source">
+          <h2>Source <span id="ex-name"></span></h2>
+          <div class="body"><pre class="code" id="code"></pre></div>
+        </section>
+        <section class="card" data-own="scope">
+          <h2>Scope chain <span>lexical environments</span></h2>
+          <div class="body" id="scopes"></div>
+        </section>
+      </div>
+
+      <div class="col">
+        <section class="card" data-own="stack">
+          <h2>Call stack <span>LIFO · one thread</span></h2>
+          <div class="body"><div class="stack" id="stack"></div></div>
+        </section>
+        <section class="card" data-own="loop">
+          <h2>Event loop</h2>
+          <div class="body">
+            <div class="loop">
+              <div class="rotor" id="rotor">
+                <svg viewBox="0 0 100 100" aria-hidden="true">
+                  <circle cx="50" cy="50" r="38" fill="none" stroke="var(--rule)" stroke-width="2.5"/>
+                  <circle cx="50" cy="50" r="38" fill="none" stroke="var(--ink)" stroke-width="2.5" stroke-dasharray="10 14" stroke-linecap="round"/>
+                  <g class="arm"><line x1="50" y1="50" x2="50" y2="16" stroke="var(--ink)" stroke-width="3" stroke-linecap="round"/><circle cx="50" cy="16" r="5.5" fill="var(--ink)"/></g>
+                  <circle cx="50" cy="50" r="4" fill="var(--ink)"/>
+                </svg>
+              </div>
+              <div style="min-width:0">
+                <div class="phase" id="phase">idle</div>
+                <div class="rule-txt" id="rule"></div>
+                <div class="gate" id="gate">stack busy</div>
+              </div>
+            </div>
+            <div class="phaselist" id="phases"></div>
+          </div>
+        </section>
+      </div>
+
+      <div class="col">
+        <section class="card" data-own="apis">
+          <h2 id="api-title">Web APIs <span>runs off-thread</span></h2>
+          <div class="body tight"><div class="lane" id="apis"></div></div>
+        </section>
+        <section class="card">
+          <h2>Queues <span>callbacks waiting for the stack</span></h2>
+          <div class="body" style="padding:0">
+            <div class="q g-tick" data-ownq="qtick">
+              <div class="q-h"><i class="dot" style="background:var(--tick)"></i><b>nextTick queue</b><small>Node only · drains first</small></div>
+              <div class="lane" id="q-tick"></div>
+            </div>
+            <div class="q" data-ownq="qmicro">
+              <div class="q-h"><i class="dot" style="background:var(--micro)"></i><b>Microtask queue</b><small>promises · await · drained fully</small></div>
+              <div class="lane" id="q-micro"></div>
+            </div>
+            <div class="q" data-ownq="qmacro">
+              <div class="q-h"><i class="dot" style="background:var(--macro)"></i><b id="macro-label">Task queue (macrotasks)</b><small>timers · I/O · one per turn</small></div>
+              <div class="lane" id="q-macro"></div>
+            </div>
+            <div class="q g-check" data-ownq="qcheck">
+              <div class="q-h"><i class="dot" style="background:var(--check)"></i><b>Check queue</b><small>setImmediate</small></div>
+              <div class="lane" id="q-check"></div>
+            </div>
+          </div>
+        </section>
+        <section class="card" data-own="console">
+          <h2>Console</h2>
+          <div class="body tight"><div class="out" id="out"></div></div>
+        </section>
+      </div>
+    </div>
+  </div>
+
+  <!-- ======================= SANDBOX ======================= -->
+  <div id="view-sandbox" hidden>
+    <div class="controls" style="margin-bottom:14px">
+      <select id="snippet" aria-label="Starter snippet"></select>
+      <button id="sb-run" class="primary">Run ▶</button>
+      <button id="sb-step">Step →</button>
+      <button id="sb-auto">Auto</button>
+      <button id="sb-reset">Reset</button>
+    </div>
+
+    <div class="narrate" id="sb-narrate">
+      <span class="stepno" id="sb-stepno">idle</span>
+      <p id="sb-note">Write code, <b>predict the output before you run it</b>, then step through. This tab really executes your code — the queues below are the actual scheduling, not a recording.</p>
+    </div>
+
+    <div class="grid">
+      <div class="col">
+        <section class="card" data-own="source">
+          <h2>Your code <span>editable</span></h2>
+          <div class="body">
+            <textarea id="src" spellcheck="false" aria-label="Source code"></textarea>
+            <div class="hintbar" id="hint"></div>
+          </div>
+        </section>
+
+        <section class="card" data-own="scope">
+          <h2>Scope chain <span>read from your source</span></h2>
+          <div class="body">
+            <div id="sb-scopes"></div>
+            <div class="scope-note">
+              Scope is <b>lexical</b> — fixed by where code is written, so this is computed from the source, not the run.
+              Highlighted = the chain the running callback resolves names through.
+              <span class="cap">captured</span> = referenced by an inner function, so a closure keeps it alive.
+            </div>
+          </div>
+        </section>
+      </div>
+
+      <div class="col">
+        <section class="card" data-own="stack">
+          <h2>Executing <span>on the one thread</span></h2>
+          <div class="body"><div class="stack" id="sb-stack"></div></div>
+        </section>
+        <section class="card" data-own="loop">
+          <h2>Event loop</h2>
+          <div class="body">
+            <div class="loop">
+              <div class="rotor" id="sb-rotor">
+                <svg viewBox="0 0 100 100" aria-hidden="true">
+                  <circle cx="50" cy="50" r="38" fill="none" stroke="var(--rule)" stroke-width="2.5"/>
+                  <circle cx="50" cy="50" r="38" fill="none" stroke="var(--ink)" stroke-width="2.5" stroke-dasharray="10 14" stroke-linecap="round"/>
+                  <g class="arm"><line x1="50" y1="50" x2="50" y2="16" stroke="var(--ink)" stroke-width="3" stroke-linecap="round"/><circle cx="50" cy="16" r="5.5" fill="var(--ink)"/></g>
+                  <circle cx="50" cy="50" r="4" fill="var(--ink)"/>
+                </svg>
+              </div>
+              <div style="min-width:0">
+                <div class="phase" id="sb-phase">idle</div>
+                <div class="rule-txt" id="sb-rule"></div>
+                <div class="gate" id="sb-gate">idle</div>
+              </div>
+            </div>
+            <div class="phaselist" id="sb-phases"></div>
+            <div class="clock">virtual clock <b id="sb-clock">0 ms</b> · steps <b id="sb-count">0</b></div>
+          </div>
+        </section>
+      </div>
+
+      <div class="col">
+        <section class="card" data-own="apis">
+          <h2 id="sb-api-title">Web APIs <span>timers pending</span></h2>
+          <div class="body tight"><div class="lane" id="sb-apis"></div></div>
+        </section>
+        <section class="card">
+          <h2>Queues <span>live</span></h2>
+          <div class="body" style="padding:0">
+            <div class="q s-tick" data-ownq="qtick">
+              <div class="q-h"><i class="dot" style="background:var(--tick)"></i><b>nextTick queue</b><small>Node only · drains first</small></div>
+              <div class="lane" id="sb-q-tick"></div>
+            </div>
+            <div class="q" data-ownq="qmicro">
+              <div class="q-h"><i class="dot" style="background:var(--micro)"></i><b>Microtask queue</b><small>drained fully</small></div>
+              <div class="lane" id="sb-q-micro"></div>
+            </div>
+            <div class="q" data-ownq="qmacro">
+              <div class="q-h"><i class="dot" style="background:var(--macro)"></i><b>Task queue (macrotasks)</b><small>one per turn</small></div>
+              <div class="lane" id="sb-q-macro"></div>
+            </div>
+            <div class="q s-check" data-ownq="qcheck">
+              <div class="q-h"><i class="dot" style="background:var(--check)"></i><b>Check queue</b><small>setImmediate</small></div>
+              <div class="lane" id="sb-q-check"></div>
+            </div>
+          </div>
+        </section>
+        <section class="card" data-own="console">
+          <h2>Console</h2>
+          <div class="body tight"><div class="out" id="sb-out"></div></div>
+        </section>
+      </div>
+    </div>
+  </div>
+
+  <div class="legend">
+    <span><i class="dot" style="background:var(--sync)"></i>synchronous</span>
+    <span><i class="dot" style="background:var(--micro)"></i>microtask</span>
+    <span><i class="dot" style="background:var(--macro)"></i>macrotask</span>
+    <span><i class="dot" style="background:var(--tick)"></i>process.nextTick</span>
+    <span><i class="dot" style="background:var(--check)"></i>setImmediate</span>
+    <span><i class="dot" style="background:var(--dormant)"></i>pending in platform API</span>
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+let runtime = 'browser';
+
+function chips(el,list,cls,emptyTxt){
+  el.innerHTML = list.length
+    ? list.map(x=>`<span class="chip ${cls}">${x.label}</span>`).join('')
+    : `<span class="chip dormant"><em>${emptyTxt||'empty'}</em></span>`;
+  el.classList.toggle('hot', list.length>0);
+}
+function escapeHtml(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+/* ============================================================
+   PART 1 — GUIDED: hand-authored traces
+   ============================================================ */
+function Trace(){
+  const steps=[];
+  const s={line:null,note:'',phase:'idle',rule:'',stack:[],scopes:[],apis:[],micro:[],macro:[],tick:[],check:[],out:[]};
+  const api={
+    at(n){s.line=n;return api},
+    say(t){s.note=t;return api},
+    phase(p,r){s.phase=p;if(r!==undefined)s.rule=r;return api},
+    push(name,sub,kind){s.stack.push({name,sub:sub||'',kind:kind||'sync'});return api},
+    pop(){s.stack.pop();return api},
+    scope(name,kind,binds){s.scopes.push({name,kind:kind||'fn',binds:binds||[],closed:false});return api},
+    bind(n,k,v){const sc=s.scopes.find(x=>x.name===n);const b=sc.binds.find(x=>x.k===k);
+      if(b)b.v=v;else sc.binds.push({k,v});return api},
+    closeScope(n,keep){const i=s.scopes.findIndex(x=>x.name===n);if(i<0)return api;
+      if(keep)s.scopes[i].closed=true;else s.scopes.splice(i,1);return api},
+    dropScope(n){return api.closeScope(n,false)},
+    apiAdd(label,meta){s.apis.push({label,meta:meta||''});return api},
+    apiDone(label){const i=s.apis.findIndex(x=>x.label===label);if(i>=0)s.apis.splice(i,1);return api},
+    q(w,label){s[w].push({label});return api},
+    deq(w){s[w].shift();return api},
+    log(t){s.out.push(t);return api},
+    snap(){steps.push(JSON.parse(JSON.stringify(s)));return api},
+    done(){return steps}
+  };
+  return api;
+}
+
+const EXAMPLES = {};
+
+EXAMPLES.stack = {
+  name:'1 · Call stack & scope', node:'both',
+  code:["const app = 'demo';","","function greet(name) {","  const msg = hello(name);","  console.log(msg);","}","","function hello(who) {","  return `Hi, ${who}`;","}","","greet('Asha');"],
+  build(){const t=Trace();
+    t.phase('running script','The stack is the only place code runs.')
+     .push('main()','module').scope('Global','global',[{k:'app',v:'TDZ'},{k:'greet',v:'ƒ'},{k:'hello',v:'ƒ'}])
+     .at(1).say("Script starts. A <b>global execution context</b> is pushed. Function <i>declarations</i> are hoisted, so greet and hello already exist — but <b>app</b> sits in the temporal dead zone until line 1 runs.").snap();
+    t.at(1).bind('Global','app',"'demo'").say("<b>app</b> is initialised. Its TDZ is over.").snap();
+    t.at(12).push('greet',"'Asha'").scope('greet','fn',[{k:'name',v:"'Asha'"},{k:'msg',v:'TDZ'}])
+     .say("<b>greet('Asha')</b> is called. A new frame is pushed and a new lexical environment is created, whose parent is Global.").snap();
+    t.at(4).push('hello',"'Asha'").scope('hello','fn',[{k:'who',v:"'Asha'"}])
+     .say("greet calls <b>hello</b>. The stack is now three deep — greet <i>cannot continue</i> until hello returns. This is what <b>single-threaded</b> means.").snap();
+    t.at(9).say("hello resolves <b>who</b> by walking the scope chain — found in its own environment. It returns \"Hi, Asha\".").snap();
+    t.at(4).pop().dropScope('hello').bind('greet','msg',"'Hi, Asha'")
+     .say("hello returns. Its frame pops and its environment is <b>discarded</b> — nothing references it, so it becomes garbage.").snap();
+    t.at(5).log('Hi, Asha').say("console.log runs synchronously — straight to the output.").snap();
+    t.at(6).pop().dropScope('greet').say("greet returns. Frame popped, environment discarded.").snap();
+    t.at(12).pop().phase('stack empty','Nothing was scheduled, so the loop has nothing to pick up.')
+     .say("The script finishes and <b>main() pops</b>. Stack empty. No callbacks were ever handed to the platform, so the event loop has nothing to do. The program exits.").snap();
+    return t.done();}
+};
+
+EXAMPLES.closure = {
+  name:'2 · Closures retain scope', node:'both',
+  code:["function makeCounter() {","  let count = 0;","  return function tick() {","    count += 1;","    return count;","  };","}","","const next = makeCounter();","console.log(next());","console.log(next());"],
+  build(){const t=Trace();
+    t.phase('running script','').push('main()','module')
+     .scope('Global','global',[{k:'makeCounter',v:'ƒ'},{k:'next',v:'TDZ'}])
+     .at(1).say("Script starts. <b>makeCounter</b> is hoisted; <b>next</b> is in the TDZ.").snap();
+    t.at(9).push('makeCounter').scope('makeCounter #1','fn',[{k:'count',v:'0'},{k:'tick',v:'ƒ'}])
+     .say("<b>makeCounter()</b> is called. Its environment holds <b>count = 0</b> and the function <b>tick</b>.").snap();
+    t.at(3).say("<b>tick</b> is created <i>inside</i> this environment. Because scope is <b>lexical</b>, tick permanently remembers where it was <i>written</i> — not where it will be called.").snap();
+    t.at(9).pop().closeScope('makeCounter #1',true).bind('Global','next','ƒ tick')
+     .say("makeCounter returns and its <b>frame pops</b> — but its environment survives (dashed). <b>tick</b> still references <b>count</b>, so it stays reachable. <i>That</i> is a closure.").snap();
+    t.at(10).push('tick','closure','micro').scope('tick','fn',[])
+     .say("<b>next()</b> calls tick. tick's own environment is empty — so <b>count</b> is resolved by walking <i>up the scope chain</i> into the retained closure.").snap();
+    t.at(4).bind('makeCounter #1','count','1')
+     .say("<b>count</b> is found in the closed-over environment and incremented to <b>1</b>. The variable outlived the stack frame that created it.").snap();
+    t.at(10).pop().dropScope('tick').log('1').say("tick returns 1.").snap();
+    t.at(11).push('tick','closure','micro').scope('tick','fn',[]).bind('makeCounter #1','count','2')
+     .say("Called again — the <b>same</b> retained environment, so count continues from 1 to <b>2</b>. Each fresh call to makeCounter would create its own.").snap();
+    t.at(11).pop().dropScope('tick').log('2').say("tick returns 2.").snap();
+    t.at(11).pop().phase('stack empty','')
+     .say("Script ends. <b>Memory note:</b> a closure keeps its <i>whole</i> environment alive. Hold thousands of these and you have a leak.").snap();
+    return t.done();}
+};
+
+EXAMPLES.timeout = {
+  name:'3 · setTimeout(fn, 0) is not immediate', node:'both',
+  code:["console.log('1: start');","","setTimeout(() => {","  console.log('3: timeout');","}, 0);","","console.log('2: end');"],
+  build(){const t=Trace();
+    t.phase('running script','The loop only looks at the queues when the stack is empty.')
+     .push('main()','module').scope('Global','global',[])
+     .at(1).log('1: start').say("Synchronous log. Runs immediately on the stack.").snap();
+    t.at(3).push('setTimeout','platform API')
+     .say("<b>setTimeout</b> is called. Note: setTimeout is <i>not part of the JavaScript language</i> — it is an API the <b>platform</b> provides.").snap();
+    t.at(5).pop().apiAdd('timer 0ms → cb','off-thread')
+     .say("The platform takes the callback and starts a <b>0 ms timer off the main thread</b>. setTimeout itself returns instantly — it does <i>not</i> wait.").snap();
+    t.at(7).log('2: end').say("The rest of the script keeps running. This is why \"2: end\" beats \"3: timeout\" — even with a 0 ms delay.").snap();
+    t.at(7).apiDone('timer 0ms → cb').q('macro','timeout cb')
+     .say("The timer expires. The platform moves the callback into the <b>task queue</b>. It is <b>not</b> executed — it just waits its turn.").snap();
+    t.pop().phase('stack empty','Stack empty → microtasks first → then ONE macrotask.').at(null)
+     .say("<b>main() pops. The stack is finally empty</b> — only now does the event loop get to do anything at all.").snap();
+    t.phase('check microtasks','Microtask queue is empty — move on.')
+     .say("The loop always drains <b>microtasks</b> first. There are none here.").snap();
+    t.phase('take 1 macrotask','').deq('macro').push('timeout cb','from task queue','macro')
+     .at(4).say("The loop takes <b>one</b> task from the queue and pushes it onto the stack.").snap();
+    t.at(4).log('3: timeout').say("Now — and only now — the callback runs.").snap();
+    t.pop().phase('idle','')
+     .say("Output order: <b>1, 2, 3</b>. The 0 ms was never a promise of speed — it is a <b>minimum</b> delay, and the callback can only run once the stack clears.").snap();
+    return t.done();}
+};
+
+EXAMPLES.micro = {
+  name:'4 · Microtasks jump the queue', node:'both',
+  code:["console.log('A');","","setTimeout(() => console.log('B'), 0);","","Promise.resolve().then(() => {","  console.log('C');","  Promise.resolve()","    .then(() => console.log('D'));","});","","console.log('E');"],
+  build(){const t=Trace();
+    t.phase('running script','').push('main()','module').scope('Global','global',[])
+     .at(1).log('A').say("Ask the class to predict the <i>full</i> output before stepping further. Most say A, B, C, D, E.").snap();
+    t.at(3).apiAdd('timer 0ms → B','off-thread')
+     .say("The timer callback goes to the platform. It will land in the <b>macrotask</b> queue.").snap();
+    t.at(5).q('micro','then → C')
+     .say("The promise is <b>already resolved</b>, so its .then callback is queued immediately — into the <b>microtask</b> queue. Different queue, different priority.").snap();
+    t.at(3).apiDone('timer 0ms → B').q('macro','timeout → B')
+     .say("The 0 ms timer expires and B moves into the task queue. Both callbacks are now waiting — but <i>not in the same line</i>.").snap();
+    t.at(11).log('E').say("Sync code still wins. Nothing queued can run while the stack is busy.").snap();
+    t.pop().phase('stack empty','Drain the ENTIRE microtask queue before any macrotask.').at(null)
+     .say("<b>main() pops.</b> Stack empty. The loop takes over — and it checks microtasks <b>first</b>.").snap();
+    t.phase('drain microtasks','').deq('micro').push('then → C','microtask','micro').at(6)
+     .say("The microtask queue is drained first, so <b>C</b> runs before B — even though B was scheduled earlier.").snap();
+    t.at(6).log('C').snap();
+    t.at(7).q('micro','then → D')
+     .say("C schedules <b>another</b> microtask (D) <i>while the microtask queue is being drained</i>. Watch what happens to it.").snap();
+    t.at(8).pop().say("C's frame pops. The loop does <b>not</b> move on to macrotasks — it re-checks microtasks, and finds D.").snap();
+    t.phase('drain microtasks','A microtask that queues a microtask runs in the SAME drain.')
+     .deq('micro').push('then → D','microtask','micro').at(8).log('D')
+     .say("<b>D runs now</b>, still ahead of B. This is why an infinitely self-queueing microtask <b>starves the loop forever</b> — and a recursive setTimeout does not.").snap();
+    t.pop().phase('microtasks empty','')
+     .say("The microtask queue is finally empty. <i>Now</i> the loop is allowed to take a macrotask.").snap();
+    t.phase('take 1 macrotask','').deq('macro').push('timeout → B','from task queue','macro').at(3).log('B')
+     .say("B runs last.").snap();
+    t.pop().phase('idle','')
+     .say("Final output: <b>A · E · C · D · B</b>. Promises are not \"faster\" than timers — they sit in a queue the loop empties <i>completely</i> first.").snap();
+    return t.done();}
+};
+
+EXAMPLES.await = {
+  name:'5 · await is a microtask', node:'both',
+  code:["async function load() {","  console.log('2: in load');","  await null;","  console.log('4: after await');","}","","console.log('1: before');","load();","console.log('3: after call');"],
+  build(){const t=Trace();
+    t.phase('running script','').push('main()','module')
+     .scope('Global','global',[{k:'load',v:'async ƒ'}]).at(7).log('1: before').snap();
+    t.at(8).push('load','async').scope('load','fn',[])
+     .say("<b>load()</b> is called. Key point: the body of an async function runs <b>synchronously</b>, right now, on the stack. It is <i>not</i> deferred.").snap();
+    t.at(2).log('2: in load')
+     .say("Proof — this log runs <b>before</b> line 9. An async function is ordinary synchronous code <i>up to its first await</i>.").snap();
+    t.at(3).pop().closeScope('load',true).q('micro','load() continuation')
+     .say("<b>await</b> is the split point. load <b>returns immediately</b> (handing back a pending promise) and <i>everything after the await</i> is packaged as a <b>microtask continuation</b>. Its scope is retained — just like a closure.").snap();
+    t.at(9).log('3: after call')
+     .say("Control is back in the caller. The rest of the script runs while load is suspended.").snap();
+    t.pop().phase('stack empty','').at(null)
+     .say("<b>main() pops.</b> Stack empty — the loop can now drain microtasks.").snap();
+    t.phase('drain microtasks','').deq('micro').push('load() continuation','resumed','micro').at(4)
+     .say("The continuation is pulled off the microtask queue and <b>resumes load</b> exactly where it left off, with its scope intact.").snap();
+    t.at(4).log('4: after await').snap();
+    t.pop().dropScope('load').phase('idle','')
+     .say("Output: <b>1, 2, 3, 4</b>. Rule of thumb: <b>await</b> means \"run the rest of this function as a microtask.\" That is all it is.").snap();
+    return t.done();}
+};
+
+EXAMPLES.node = {
+  name:'6 · Node: nextTick vs promise vs setImmediate', node:'only',
+  code:["const fs = require('fs');","","fs.readFile(__filename, () => {","  setTimeout(() => console.log('timeout'), 0);","  setImmediate(() => console.log('immediate'));","  process.nextTick(() => console.log('nextTick'));","  Promise.resolve()","    .then(() => console.log('promise'));","  console.log('sync');","});"],
+  build(){const t=Trace();
+    t.phase('running script','').push('main()','module').scope('Global','global',[{k:'fs',v:'module'}])
+     .at(3).push('fs.readFile','libuv')
+     .say("<b>fs.readFile</b> hands the work to <b>libuv</b>, which runs it on a real <b>thread pool</b>, off the main thread. File I/O is one of the few things Node genuinely parallelises.").snap();
+    t.at(3).pop().apiAdd('readFile → cb','thread pool')
+     .say("readFile returns instantly. The callback waits until the file has been read.").snap();
+    t.pop().phase('stack empty · poll phase','Node loop: timers → pending → poll → check → close').at(null)
+     .say("<b>main() pops.</b> The loop starts and reaches the <b>poll phase</b>, where completed I/O callbacks are picked up.").snap();
+    t.at(3).apiDone('readFile → cb').push('readFile cb','poll phase','macro')
+     .say("The file is ready. Its callback runs <b>inside the poll phase</b>. Everything scheduled from here has a <b>deterministic</b> order — which is exactly why we use an I/O callback for this demo.").snap();
+    t.at(4).q('macro','timeout')
+     .say("<b>setTimeout 0</b> → queued for the <b>timers</b> phase. We have already passed timers this turn, so it cannot run until the <b>next</b> loop iteration.").snap();
+    t.at(5).q('check','immediate')
+     .say("<b>setImmediate</b> → queued for the <b>check</b> phase, which comes <i>right after</i> poll. So it runs on <b>this</b> turn.").snap();
+    t.at(6).q('tick','nextTick')
+     .say("<b>process.nextTick</b> → its own queue, which drains <b>before</b> promise microtasks and before the loop moves on. The highest priority of all.").snap();
+    t.at(7).q('micro','promise').say("<b>Promise.then</b> → the microtask queue.").snap();
+    t.at(9).log('sync').say("Sync code inside the callback still runs first. Nothing queued can interrupt it.").snap();
+    t.pop().phase('callback done','nextTick queue first, then microtasks.').at(null)
+     .say("The I/O callback returns and the stack is empty. Now the priority order plays out.").snap();
+    t.phase('drain nextTick','').deq('tick').push('nextTick','tick queue','tick').log('nextTick')
+     .say("<b>nextTick runs first</b> — ahead of promises. Recursively calling nextTick starves the loop entirely, which is why it is a footgun.").snap();
+    t.pop().phase('drain microtasks','').deq('micro').push('promise','microtask','micro').log('promise')
+     .say("Then the microtask queue drains.").snap();
+    t.pop().phase('check phase','').deq('check').push('immediate','check phase','check').at(5).log('immediate')
+     .say("The loop moves from <b>poll</b> to <b>check</b> — so <b>setImmediate</b> fires, still on this same turn.").snap();
+    t.pop().phase('next turn · timers','').deq('macro').push('timeout','timers phase','macro').at(4).log('timeout')
+     .say("Only on the <b>next iteration</b> does the loop come back around to <b>timers</b> — so the 0 ms timeout runs <b>last</b>.").snap();
+    t.pop().phase('idle','')
+     .say("Order: <b>sync · nextTick · promise · immediate · timeout</b>. <i>Caveat worth telling the class:</i> at the <b>top level</b>, setTimeout(0) vs setImmediate is <b>nondeterministic</b>. Inside an I/O callback it is guaranteed.").snap();
+    return t.done();}
+};
+
+
+EXAMPLES.immediate = {
+  name:'7 · Inside setImmediate — now it is deterministic', node:'only',
+  code:["setImmediate(() => {","  console.log('1: inside setImmediate');","","  setTimeout(() => console.log('5: timeout'), 0);","  process.nextTick(() => console.log('3: nextTick'));","  Promise.resolve()","    .then(() => console.log('4: promise'));","","  console.log('2: sync, still in the callback');","});"],
+  build(){const t=Trace();
+    t.phase('running script','').push('main()','module').scope('Global','global',[])
+     .at(1).q('check','immediate cb')
+     .say("<b>setImmediate</b> queues its callback for the <b>check</b> phase. Note what we are <i>not</i> doing: at the top level, timer-vs-immediate ordering is nondeterministic. Scheduling from <b>inside</b> a callback is how you get a guarantee.").snap();
+    t.pop().phase('lap 1 · timers','Node loop: timers → pending → poll → check → close').at(null)
+     .say("<b>main() pops.</b> The loop starts lap 1 and <b>freezes its clock</b>. Timers phase: nothing due.").snap();
+    t.phase('lap 1 · poll','')
+     .say("<b>poll</b> — normally the loop sleeps here. But there is an <b>immediate pending</b>, so poll does <b>not block at all</b> and moves straight on.").snap();
+    t.phase('lap 1 · check','').deq('check').push('immediate cb','check phase','check').at(2).log('1: inside setImmediate')
+     .say("<b>check phase.</b> Our callback runs. <b>Everything scheduled from here has a guaranteed order</b> — that is the whole point of this example.").snap();
+    t.at(4).apiAdd('timer 0ms → 5','clamped to 1ms')
+     .say("<b>setTimeout(…, 0)</b> — Node clamps this to <b>1 ms</b>, and the loop already froze its clock at the top of this lap. So its deadline is <i>after</i> now: it cannot run on this lap. It must wait for the <b>next</b> trip round to timers.").snap();
+    t.at(5).q('tick','nextTick → 3')
+     .say("<b>process.nextTick</b> → its own queue, which drains the moment this callback returns.").snap();
+    t.at(6).q('micro','promise → 4')
+     .say("<b>Promise.then</b> → V8's microtask queue, drained right after nextTick.").snap();
+    t.at(9).log('2: sync, still in the callback')
+     .say("Sync code first, as always. <b>Nothing queued can interrupt a running callback.</b>").snap();
+    t.pop().phase('lap 1 · check · done','nextTick first, then microtasks.').at(null)
+     .say("The callback returns and the stack is empty. Now the priority order plays out — <b>before</b> the loop is allowed to advance a single phase.").snap();
+    t.phase('drain nextTick','').deq('tick').push('nextTick → 3','tick queue','tick').at(5).log('3: nextTick')
+     .say("<b>nextTick runs first.</b> It drains after <i>every</i> callback — not just between phases — and it beats promises.").snap();
+    t.pop().phase('drain microtasks','').deq('micro').push('promise → 4','microtask','micro').at(7).log('4: promise')
+     .say("Then the <b>microtask</b> queue drains. Both of these ran while the loop was still sitting in the check phase.").snap();
+    t.pop().phase('lap 1 · close','')
+     .say("<b>close</b> phase — nothing to close. libuv asks: any referenced handles left? <b>Yes</b> — that timer. So the loop turns again.").snap();
+    t.phase('lap 2 · start','').apiDone('timer 0ms → 5').q('macro','timeout → 5')
+     .say("<b>Lap 2.</b> The clock is re-frozen at the new time, so the 1 ms deadline has now passed. The timer moves out of the platform and into the <b>timers</b> queue.").snap();
+    t.phase('lap 2 · timers','').deq('macro').push('timeout → 5','timers phase','macro').at(4).log('5: timeout')
+     .say("The <b>timers</b> phase finally runs it — a <b>full lap</b> after it was scheduled.").snap();
+    t.pop().phase('idle','')
+     .say("Order: <b>1 · 2 · 3 · 4 · 5</b> — and unlike the top-level case, this is <b>guaranteed every single run</b>. <i>The rule:</i> nextTick and microtasks are drained before the loop moves at all, so they always beat a timer scheduled alongside them, which has to wait a whole lap.").snap();
+    return t.done();}
+};
+
+
+EXAMPLES.race_imm = {
+  name:'8 · setTimeout(0) AFTER setImmediate — the fast start', node:'only',
+  code:["setTimeout(() => console.log('timeout'), 0);","","setImmediate(() => console.log('immediate'));","","// nothing else — the script ends immediately,","// so the loop starts while the clock is still ~0ms"],
+  build(){const t=Trace();
+    t.phase('running script','').push('main()','module').scope('Global','global',[])
+     .at(1).apiAdd('timer 0ms → timeout','clamped to 1ms')
+     .say("<b>setTimeout(…, 0)</b>. Node <b>clamps this to 1 ms</b> — a 0 ms timer does not exist. Its deadline is therefore <b>1 ms</b>.").snap();
+    t.at(3).q('check','immediate')
+     .say("<b>setImmediate</b> goes straight into the <b>check</b> queue. No clamp, no deadline — it just waits for the check phase.").snap();
+    t.pop().phase('lap 1 · clock frozen at ~0ms','Node loop: timers → pending → poll → check → close').at(null)
+     .say("<b>main() pops</b> almost instantly — the script did nothing else. The loop starts lap 1 and freezes its clock at roughly <b>0 ms</b>.").snap();
+    t.phase('lap 1 · timers','')
+     .say("<b>timers phase.</b> Is the timer due? Its deadline is <b>1 ms</b>, the frozen clock says <b>~0 ms</b>. <b>Not due.</b> The phase runs nothing and moves on.").snap();
+    t.phase('lap 1 · poll','')
+     .say("<b>poll</b> — normally the loop would sleep here until the timer is due. But there is an <b>immediate pending</b>, so poll does <b>not block at all</b>.").snap();
+    t.phase('lap 1 · check','').deq('check').push('immediate','check phase','check').at(3).log('immediate')
+     .say("<b>check phase</b> — the immediate runs. It has <b>beaten the timer</b>, purely because the process started faster than 1 ms.").snap();
+    t.pop().phase('lap 1 · close','')
+     .say("close phase — nothing to close. A referenced handle (the timer) remains, so the loop turns again.").snap();
+    t.phase('lap 2 · clock now past 1ms','').apiDone('timer 0ms → timeout').q('macro','timeout')
+     .say("<b>Lap 2.</b> The clock is re-frozen — by now more than 1 ms of real time has passed, so the timer is finally due and moves into the timers queue.").snap();
+    t.phase('lap 2 · timers','').deq('macro').push('timeout','timers phase','macro').at(1).log('timeout')
+     .say("The <b>timers</b> phase runs it — one full lap later.").snap();
+    t.pop().phase('idle','')
+     .say("Output: <b>immediate, timeout</b>. <b>But this is not guaranteed.</b> It happened only because startup took under 1 ms. Run it enough times on a loaded machine and you <i>will</i> see the other order — try example 9 to force it.").snap();
+    return t.done();}
+};
+
+EXAMPLES.race_timer = {
+  name:'9 · setTimeout(0) BEFORE setImmediate — the slow start', node:'only',
+  code:["setTimeout(() => console.log('timeout'), 0);","","setImmediate(() => console.log('immediate'));","","// burn >1ms of synchronous time before the","// loop ever gets to run","const end = Date.now() + 5;","while (Date.now() < end) {}"],
+  build(){const t=Trace();
+    t.phase('running script','').push('main()','module').scope('Global','global',[])
+     .at(1).apiAdd('timer 0ms → timeout','due at 1ms')
+     .say("Identical scheduling to example 8: the timer is clamped to a <b>1 ms</b> deadline.").snap();
+    t.at(3).q('check','immediate')
+     .say("And the immediate is queued for the check phase. So far, nothing has changed.").snap();
+    t.at(8).push('while loop','blocking')
+     .say("<b>Here is the difference.</b> Five milliseconds of <b>synchronous</b> work. The stack is busy, so the loop <b>cannot start</b> — and meanwhile the timer's 1 ms deadline quietly passes.").snap();
+    t.at(8).apiDone('timer 0ms → timeout').q('macro','timeout')
+     .say("Real time marches on while we block. The timer is now <b>overdue</b> — but nothing can notice yet, because nothing can run.").snap();
+    t.pop().pop().phase('lap 1 · clock frozen at ~5ms','').at(null)
+     .say("<b>main() finally pops</b> after 5 ms. The loop starts lap 1 and freezes its clock at <b>~5 ms</b> — well past the timer's deadline.").snap();
+    t.phase('lap 1 · timers','').deq('macro').push('timeout','timers phase','macro').at(1).log('timeout')
+     .say("<b>timers phase.</b> Is the timer due? Deadline <b>1 ms</b>, frozen clock <b>~5 ms</b>. <b>Yes.</b> It runs — and timers is the <i>first</i> phase, so it goes before anything else.").snap();
+    t.pop().phase('lap 1 · poll','')
+     .say("poll — an immediate is pending, so no blocking.").snap();
+    t.phase('lap 1 · check','').deq('check').push('immediate','check phase','check').at(3).log('immediate')
+     .say("<b>check phase</b> — only now does the immediate run. It lost, and it lost <b>deterministically</b>.").snap();
+    t.pop().phase('idle','')
+     .say("Output: <b>timeout, immediate</b> — every single run. <b>The rule:</b> the winner is decided by <i>whether the timer's deadline has already passed when the loop first reaches the timers phase</i>. Under 1 ms of startup → immediate wins. Over 1 ms → timeout wins. At the top level you cannot control that, which is exactly why the ordering is called nondeterministic.").snap();
+    return t.done();}
+};
+
+
+/* ============================================================
+   LOOP PHASE / STEP LIST
+   Node  → libuv's six phases.
+   Browser → the HTML spec's processing model. Different shape,
+   same idea: a fixed sequence the loop walks each turn.
+   ============================================================ */
+const UV_PHASES = [
+  ['timers',        'setTimeout / setInterval'],
+  ['pending',       'deferred system callbacks'],
+  ['idle, prepare', 'internal — nothing of yours runs here'],
+  ['poll',          'I/O · the loop sleeps here'],
+  ['check',         'setImmediate'],
+  ['close',         "socket.on('close')"]
+];
+const HTML_STEPS = [
+  ['task',      'ONE task from a task queue'],
+  ['render?',   'only at a rendering opportunity (~60fps)'],
+  ['rAF',       'requestAnimationFrame callbacks'],
+  ['style → layout → paint', 'the frame is drawn'],
+  ['idle',      'requestIdleCallback, if time is left']
+];
+
+function phaseKey(txt){
+  if(!txt) return null;
+  const t = String(txt).toLowerCase();
+  // Handle micro/nextTick FIRST and always return — otherwise 'microtasks'
+  // would later match the substring 'task' and light the wrong row.
+  if(t.includes('nexttick') || t.includes('microtask')){
+    return /empty|done/.test(t) ? null : 'drain';   // '…empty' = drain finished
+  }
+  if(runtime === 'node'){
+    if(t.includes('timer'))   return 'timers';
+    if(t.includes('pending')) return 'pending';
+    if(t.includes('poll'))    return 'poll';
+    if(t.includes('check'))   return 'check';
+    if(t.includes('close'))   return 'close';
+    if(t.includes('prepare')) return 'idle, prepare';
+    return null;
+  }
+  // browser
+  if(t.includes('macrotask') || /\btask\b/.test(t)) return 'task';
+  if(t.includes('paint') || t.includes('render'))   return 'style → layout → paint';
+  if(t.includes('raf') || t.includes('frame'))      return 'rAF';
+  return null;
+}
+
+function renderPhases(hostId, phaseTxt){
+  const host = $(hostId); if(!host) return;
+  const node = runtime === 'node';
+  const rows = node ? UV_PHASES : HTML_STEPS;
+  const key  = phaseKey(phaseTxt);
+  const draining = key === 'drain';
+  const activeIdx = draining ? -1 : rows.findIndex(([k]) => k === key);
+
+  const drain = `<div class="drainband ${draining?'on':''}">
+      <span>${node ? 'nextTick → microtasks' : 'drain ALL microtasks'}</span>
+      <small>${node ? 'between every phase' : 'after every task'}</small></div>`;
+
+  // In the browser the microtask drain sits at a fixed point (after the task);
+  // in Node it happens between every phase, so it is shown once at the top.
+  const body = rows.map(([k,d],i)=>{
+    const on = i===activeIdx, done = activeIdx>=0 && i<activeIdx;
+    const row = `<div class="ph ${on?'on':''} ${done?'done':''}"><span>${k}</span><small>${d}</small></div>`;
+    return (!node && i===0) ? row + drain : row;
+  }).join('');
+
+  host.innerHTML =
+    `<div class="phasehead">${node ? 'libuv loop · one iteration' : 'HTML processing model · one turn'}</div>` +
+    (node ? drain : '') +
+    `<div class="phases">${body}</div>` +
+    `<div class="phwrap">↻ ${node
+        ? 'then round again — or exit if nothing is referenced'
+        : 'then round again — rendering only when the browser decides to paint'}</div>`;
+}
+
+/* ---------- guided render ---------- */
+let gKey=null, gSteps=[], gi=0, gTimer=null;
+const KW=/\b(const|let|var|function|return|async|await|new|require|if|else|while)\b/g;
+
+function highlight(src){
+  return src.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+    .replace(/(\/\/.*$)/gm,'<span class="tok-c">$1</span>')
+    .replace(/('[^']*'|`[^`]*`)/g,'<span class="tok-s">$1</span>')
+    .replace(KW,'<span class="tok-k">$1</span>')
+    .replace(/\b(setTimeout|setImmediate|nextTick|queueMicrotask|then|resolve|readFile|log)\b/g,'<span class="tok-f">$1</span>')
+    .replace(/\b(\d+)\b/g,'<span class="tok-n">$1</span>');
+}
+function buildMenu(){
+  const sel=$('example'); sel.innerHTML='';
+  Object.entries(EXAMPLES).forEach(([k,ex])=>{
+    if(ex.node==='only' && runtime!=='node') return;
+    const o=document.createElement('option'); o.value=k; o.textContent=ex.name; sel.appendChild(o);
+  });
+  if(!EXAMPLES[gKey] || (EXAMPLES[gKey].node==='only' && runtime!=='node')) gKey=sel.value;
+  sel.value=gKey;
+}
+function gLoad(k){
+  gKey=k; gSteps=EXAMPLES[k].build(); gi=0; gStop();
+  $('ex-name').textContent = runtime==='node'?'node':'browser';
+  $('code').innerHTML = EXAMPLES[k].code
+    .map((l,n)=>`<div class="ln" data-l="${n+1}"><span class="n">${n+1}</span><span>${highlight(l)||' '}</span></div>`).join('');
+  gRender();
+}
+function gRender(){
+  const s=gSteps[gi];
+  $('stepno').textContent = `${gi} / ${gSteps.length-1}`;
+  $('note').innerHTML = s.note;
+  document.querySelectorAll('#code .ln').forEach(el=>el.classList.toggle('on', Number(el.dataset.l)===s.line));
+
+  $('stack').innerHTML = s.stack.length
+    ? s.stack.map((f,n)=>`<div class="frame ${n===s.stack.length-1?'top':''}" data-kind="${f.kind}"><span>${f.name}</span><small>${f.sub}</small></div>`).join('')
+    : '<div class="empty">— empty — the loop may now act</div>';
+
+  $('scopes').innerHTML = s.scopes.length
+    ? s.scopes.map((sc,n)=>`<div class="scope ${n>0?'nest':''} ${sc.closed?'closed':''}">
+        <div class="scope-h"><span>${sc.name}</span><span>${sc.closed?'retained by closure':sc.kind}</span></div>
+        ${sc.binds.length? sc.binds.map(b=>`<div class="bind"><b>${b.k}</b><i class="${b.v==='TDZ'?'tdz':''}">${b.v==='TDZ'?'⊘ TDZ':b.v}</i></div>`).join('')
+          : '<div class="bind"><i>no bindings</i></div>'}</div>`).join('')
+    : '<div class="empty">no active environments</div>';
+
+  const ap=$('apis');
+  ap.innerHTML = s.apis.length
+    ? s.apis.map(a=>`<span class="chip dormant">${a.label}${a.meta?` <em>· ${a.meta}</em>`:''}</span>`).join('')
+    : '<span class="chip dormant"><em>nothing pending</em></span>';
+  ap.classList.toggle('hot', s.apis.length>0);
+
+  chips($('q-tick'),s.tick,'tick'); chips($('q-micro'),s.micro,'micro');
+  chips($('q-macro'),s.macro,'macro'); chips($('q-check'),s.check,'check');
+
+  $('phase').textContent = s.phase;
+  $('rule').textContent = s.rule || (runtime==='node'
+    ? 'timers → pending → poll → check → close' : 'drain all microtasks, then take one task');
+  const blocked = s.stack.length>0, g=$('gate');
+  g.textContent = blocked?'stack busy — loop is blocked':'stack empty — loop can run';
+  g.className='gate '+(blocked?'blocked':'open');
+  $('rotor').classList.toggle('live', !blocked && s.phase!=='idle');
+  renderPhases('phases', s.phase);
+
+  $('out').innerHTML = s.out.length ? s.out.map(l=>`<div>${escapeHtml(l)}</div>`).join('') : '<div class="ph">no output yet</div>';
+  $('back').disabled = gi===0;
+  $('step').disabled = gi>=gSteps.length-1;
+  if(gi>=gSteps.length-1) gStop();
+}
+function gNext(){ if(gi<gSteps.length-1){gi++;gRender();} }
+function gPrev(){ if(gi>0){gi--;gRender();} }
+function gStop(){ clearInterval(gTimer); gTimer=null; $('play').textContent='Run'; }
+function gPlay(){ if(gTimer){gStop();return;} $('play').textContent='Pause';
+  gTimer=setInterval(()=>{ if(gi>=gSteps.length-1) gStop(); else gNext(); },1500); }
+
+$('example').onchange = e=>gLoad(e.target.value);
+$('step').onclick = ()=>{gStop();gNext();};
+$('back').onclick = ()=>{gStop();gPrev();};
+$('play').onclick = gPlay;
+$('reset').onclick = ()=>{gStop();gi=0;gRender();};
+
+/* ============================================================
+   PART 2a — LEXICAL SCOPE ANALYSIS
+   Scope is decided by where code is *written*, so it can be read
+   straight off the source. No interpreter required.
+   ============================================================ */
+function lex(src){
+  const toks=[]; let i=0; const n=src.length;
+  const idS=c=>/[A-Za-z_$]/.test(c), idC=c=>/[A-Za-z0-9_$]/.test(c);
+  while(i<n){
+    const c=src[i];
+    if(c==='/'&&src[i+1]==='/'){ while(i<n&&src[i]!=='\n') i++; continue; }
+    if(c==='/'&&src[i+1]==='*'){ i+=2; while(i<n&&!(src[i]==='*'&&src[i+1]==='/')) i++; i+=2; continue; }
+    if(c==='"'||c==="'"){ const q=c; i++; while(i<n&&src[i]!==q){ if(src[i]==='\\') i++; i++; } i++; continue; }
+    if(c==='`'){ i++; while(i<n&&src[i]!=='`'){ if(src[i]==='\\'){i+=2;continue;} i++; } i++; continue; }
+    if(idS(c)){ const s=i; while(i<n&&idC(src[i])) i++; toks.push({t:'w',v:src.slice(s,i),i:s}); continue; }
+    if(c==='='&&src[i+1]==='>'){ toks.push({t:'p',v:'=>',i}); i+=2; continue; }
+    if('{}()[];,'.includes(c)){ toks.push({t:'p',v:c,i}); i++; continue; }
+    i++;
+  }
+  return toks;
+}
+const BLOCK_KW=new Set(['if','for','while','switch','catch','else','do','try','finally']);
+const DECL_KW=new Set(['let','const','var']);
+const RESERVED=new Set(['if','else','for','while','do','switch','case','break','continue','return','function',
+  'const','let','var','new','typeof','instanceof','in','of','this','null','true','false','undefined','async',
+  'await','try','catch','finally','throw','class','extends','super','yield','delete','void','default','static']);
+
+function buildScopes(src){
+  const toks=lex(src);
+  const root={id:0,name:'Global',kind:'global',start:0,end:src.length,decls:[],kids:[],parent:null};
+  let cur=root, nextId=1;
+  const markers=[];
+  const open=sc=>{ sc.id=nextId++; sc.parent=cur; cur.kids.push(sc); cur=sc; };
+  const close=end=>{ cur.end=end; cur=cur.parent||root; };
+  const addDecl=(sc,name,kind)=>{ if(!name||RESERVED.has(name))return;
+    if(!sc.decls.some(d=>d.name===name)) sc.decls.push({name,kind}); };
+  const matchParen=k=>{ let d=0; for(let j=k;j<toks.length;j++){
+    if(toks[j].v==='(')d++; else if(toks[j].v===')'){ d--; if(!d) return j; } } return toks.length-1; };
+  const backParen=k=>{ let d=0; for(let j=k;j>=0;j--){
+    if(toks[j].v===')')d++; else if(toks[j].v==='('){ d--; if(!d) return j; } } return 0; };
+  const paramsIn=(a,b)=>{ const out=[]; let d=0;
+    for(let j=a;j<=b;j++){ if(toks[j].v==='(')d++; else if(toks[j].v===')')d--;
+      else if(toks[j].t==='w'&&d===1&&!RESERVED.has(toks[j].v)) out.push(toks[j].v); } return out; };
+
+  const headers=[];
+  toks.forEach((t,k)=>{ if(t.t==='w'&&(t.v==='for'||t.v==='catch')&&toks[k+1]&&toks[k+1].v==='(')
+    headers.push([k+1, matchParen(k+1)]); });
+  const inHeader=k=>headers.some(([a,b])=>k>a&&k<b);
+
+  let i=0;
+  while(i<toks.length){
+    while(markers.length && markers[markers.length-1].kind==='expr' && i>=markers[markers.length-1].endTok){
+      const m=markers.pop(); close(toks[Math.max(0,m.endTok-1)].i);
+    }
+    const t=toks[i]; if(!t) break;
+
+    if(t.t==='w' && t.v==='function'){
+      let j=i+1, name='anonymous';
+      if(toks[j]&&toks[j].t==='w'){ name=toks[j].v; addDecl(cur,name,'function'); j++; }
+      let params=[];
+      if(toks[j]&&toks[j].v==='('){ const e=matchParen(j); params=paramsIn(j,e); j=e+1; }
+      if(toks[j]&&toks[j].v==='{'){
+        const sc={name:name+'()',kind:'function',start:toks[j].i,end:src.length,decls:[],kids:[]};
+        open(sc); params.forEach(p=>addDecl(sc,p,'param')); markers.push({kind:'brace'});
+        i=j+1; continue;
+      }
+      i=j; continue;
+    }
+
+    if(t.t==='p' && t.v==='=>'){
+      let params=[]; const prev=toks[i-1];
+      if(prev&&prev.v===')'){ const a=backParen(i-1); params=paramsIn(a,i-1); }
+      else if(prev&&prev.t==='w'&&!RESERVED.has(prev.v)) params=[prev.v];
+      const nxt=toks[i+1];
+      if(nxt&&nxt.v==='{'){
+        const sc={name:'arrow()',kind:'function',start:nxt.i,end:src.length,decls:[],kids:[]};
+        open(sc); params.forEach(p=>addDecl(sc,p,'param')); markers.push({kind:'brace'});
+        i+=2; continue;
+      }
+      let d=0,end=toks.length;
+      for(let j=i+1;j<toks.length;j++){ const v=toks[j].v;
+        if(v==='('||v==='{'||v==='[')d++;
+        else if(v===')'||v==='}'||v===']'){ if(!d){ end=j; break; } d--; }
+        else if((v===','||v===';')&&!d){ end=j; break; } }
+      const sc={name:'arrow()',kind:'function',start:t.i,
+        end:(toks[end]||toks[toks.length-1]).i,decls:[],kids:[]};
+      open(sc); params.forEach(p=>addDecl(sc,p,'param')); markers.push({kind:'expr',endTok:end});
+      i++; continue;
+    }
+
+    if(t.t==='w' && DECL_KW.has(t.v)){
+      const nxt=toks[i+1];
+      if(nxt&&nxt.t==='w'&&!inHeader(i)) addDecl(cur,nxt.v,t.v);
+      i+=2; continue;
+    }
+
+    if(t.t==='p' && t.v==='{'){
+      const prev=toks[i-1]; let isBlock=false, hs=-1, he=-1;
+      if(prev&&prev.v===')'){
+        const a=backParen(i-1), kw=toks[a-1];
+        if(kw&&kw.t==='w'&&BLOCK_KW.has(kw.v)){ isBlock=true; hs=a; he=i-1; }
+      } else if(prev&&prev.t==='w'&&BLOCK_KW.has(prev.v)) isBlock=true;
+
+      if(isBlock){
+        const sc={name:'block',kind:'block',start:t.i,end:src.length,decls:[],kids:[]};
+        open(sc);
+        if(hs>=0){
+          for(let j=hs;j<=he;j++)
+            if(toks[j].t==='w'&&DECL_KW.has(toks[j].v)&&toks[j+1]&&toks[j+1].t==='w')
+              addDecl(sc,toks[j+1].v,toks[j].v);
+          const kw=toks[hs-1];
+          if(kw&&kw.v==='catch') paramsIn(hs,he).forEach(p=>addDecl(sc,p,'param'));
+        }
+        markers.push({kind:'brace'});
+      } else markers.push({kind:'skip'});
+      i++; continue;
+    }
+
+    if(t.t==='p' && t.v==='}'){
+      const m=markers.pop(); if(m&&m.kind==='brace') close(t.i);
+      i++; continue;
+    }
+    i++;
+  }
+  while(markers.length){ const m=markers.pop(); if(m.kind!=='skip') close(src.length); }
+
+  const innermost=pos=>{ let best=root;
+    (function walk(s){ if(pos>=s.start&&pos<=s.end){ if(s!==root) best=s; s.kids.forEach(walk); }
+      else s.kids.forEach(k=>{ if(pos>=k.start&&pos<=k.end) walk(k); }); })(root);
+    return best; };
+  const chainUp=s=>{ const c=[]; while(s){ c.push(s); s=s.parent; } return c; };
+
+  toks.filter(t=>t.t==='w'&&!RESERVED.has(t.v)).forEach(t=>{
+    const site=innermost(t.i), chain=chainUp(site);
+    for(let k=1;k<chain.length;k++){
+      const owner=chain[k], d=owner.decls.find(x=>x.name===t.v);
+      if(d){
+        if(chain.slice(0,k).some(s=>s.kind==='function') && site!==owner) d.captured=true;
+        break;
+      }
+    }
+  });
+  return {root, innermost, chainUp};
+}
+
+/* ============================================================
+   PART 2b — SANDBOX: real execution, intercepted scheduling
+   ============================================================ */
+const MAX_STEPS = 250;
+
+const SB = { now:0, seq:0, timers:[], tick:[], micro:[], macro:[], check:[],
+  out:[], running:null, started:false, done:false, steps:0, phase:'idle', note:'', err:false,
+  activePos:-1, scopes:null, uvPhase:'idle', loopTime:0, laps:0 };
+
+function sbReset(){
+  Object.assign(SB,{now:0,seq:0,timers:[],tick:[],micro:[],macro:[],check:[],
+    out:[],running:null,started:false,done:false,steps:0,phase:'idle',err:false,activePos:-1,
+    uvPhase:'idle',loopTime:0,laps:0,blockedMs:0,
+    note:'Ready. <b>Predict the output before you press Run.</b>'});
+  sbAnalyze(); sbStopAuto(); sbRender();
+}
+function sbAnalyze(){
+  try{ SB.scopes = buildScopes($('src').value); }
+  catch(e){ SB.scopes = null; }
+}
+
+function labelOf(fn, fallback){
+  if(typeof fn!=='function') return fallback||'cb';
+  const m = String(fn).match(/log\(\s*(['"`])([^'"`]{0,18})\1/);
+  if(m) return `→ ${m[2]}`;
+  if(fn.name && fn.name!=='anonymous') return fn.name;
+  return fallback||'cb';
+}
+
+/* where in the source does this callback's *body* start?
+   lets us light up the scope chain it will resolve names through */
+function bodyPos(fn){
+  if(typeof fn!=='function') return -1;
+  const s=String(fn), src=$('src').value, idx=src.indexOf(s);
+  if(idx<0) return -1;
+  const b=s.indexOf('{'), a=s.indexOf('=>');
+  let off = (b>=0 && (a<0 || b<a)) ? b+1
+          : (a>=0 && b>a)          ? b+1
+          : (a>=0)                 ? a+2
+          : (b>=0)                 ? b+1 : 1;
+  return idx+off;
+}
+
+/* minimal Promise routed through OUR microtask queue */
+class SPromise {
+  constructor(exec){
+    this.state='pending'; this.value=undefined; this.cbs=[];
+    const settle=(st,v)=>{
+      if(this.state!=='pending') return;
+      if(st==='fulfilled' && v && typeof v.then==='function'){
+        v.then(x=>settle('fulfilled',x), e=>settle('rejected',e)); return;
+      }
+      this.state=st; this.value=v;
+      this.cbs.forEach(c=>SB.micro.push(c)); this.cbs=[];
+    };
+    try{ exec(v=>settle('fulfilled',v), e=>settle('rejected',e)); }
+    catch(e){ settle('rejected',e); }
+  }
+  then(onF,onR){
+    return new SPromise((res,rej)=>{
+      const item={ label:'then '+labelOf(onF,''), pos:bodyPos(onF), run:()=>{
+        try{
+          if(this.state==='fulfilled'){ onF ? res(onF(this.value)) : res(this.value); }
+          else { onR ? res(onR(this.value)) : rej(this.value); }
+        }catch(e){ rej(e); }
+      }};
+      if(this.state==='pending') this.cbs.push(item); else SB.micro.push(item);
+    });
+  }
+  catch(f){ return this.then(undefined,f); }
+  finally(f){ return this.then(v=>{f();return v;}, e=>{f();throw e;}); }
+  static resolve(v){ return new SPromise(r=>r(v)); }
+  static reject(e){ return new SPromise((_,r)=>r(e)); }
+  static all(list){
+    return new SPromise((res,rej)=>{
+      const arr=[...list], out=new Array(arr.length); let left=arr.length;
+      if(!left) return res([]);
+      arr.forEach((p,i)=>SPromise.resolve(p).then(v=>{ out[i]=v; if(--left===0) res(out); }, rej));
+    });
+  }
+}
+
+function fmt(v){ if(typeof v==='string') return v;
+  try{ return JSON.stringify(v); }catch(e){ return String(v); } }
+
+function sbShims(){
+  const isNode = runtime==='node';
+  const con = {
+    log:(...a)=>SB.out.push({t:a.map(fmt).join(' ')}),
+    error:(...a)=>SB.out.push({t:a.map(fmt).join(' '),bad:true}),
+    warn:(...a)=>SB.out.push({t:a.map(fmt).join(' ')})
+  };
+  const st=(fn,ms)=>{
+    if(SB.timers.length>40) throw new Error('Too many pending timers in the sandbox (limit 40).');
+    const raw=Number(ms)||0;
+    // Node clamps setTimeout(fn,0) to 1ms — that clamp is why a 0ms timer
+    // can lose to setImmediate on the first lap of the loop.
+    const d = isNode ? Math.max(1, raw) : raw;
+    SB.timers.push({id:++SB.seq, label:`timer ${raw}ms ${labelOf(fn,'')}`, due:SB.now+d, fn, pos:bodyPos(fn)});
+    const id=SB.seq;
+    return id;
+  };
+  const si=()=>{ throw new Error('setInterval is not supported here — use setTimeout so the trace stays finite.'); };
+  const qm=fn=>SB.micro.push({label:'queueMicrotask '+labelOf(fn,''), pos:bodyPos(fn), run:fn});
+  const imm=fn=>{
+    if(!isNode) throw new Error('setImmediate is Node-only — flip the runtime toggle to Node.');
+    SB.check.push({label:'immediate '+labelOf(fn,''), pos:bodyPos(fn), run:fn});
+  };
+  const proc={ nextTick:fn=>{
+    if(!isNode) throw new Error('process.nextTick is Node-only — flip the runtime toggle to Node.');
+    SB.tick.push({label:'nextTick '+labelOf(fn,''), pos:bodyPos(fn), run:fn});
+  }};
+  // Sandbox-only helper: simulates synchronous blocking work.
+  // A real `while (Date.now() < end) {}` would burn wall-clock time but leave
+  // the VIRTUAL clock untouched, so it could not be demonstrated here.
+  const block = ms => {
+    const d = Math.max(0, Number(ms)||0);
+    if(d > 10000) throw new Error('blockFor() is capped at 10000ms in the sandbox.');
+    SB.now += d; SB.blockedMs = (SB.blockedMs||0) + d;
+  };
+  return [con, st, si, qm, SPromise, proc, imm, block];
+}
+
+function guard(fn){
+  try{ fn(); }
+  catch(e){
+    const m = String((e && e.message) || e);
+    SB.out.push({t:m, bad:true});
+    SB.done=true; SB.err=true; SB.running=null; SB.phase='error';
+    SB.note='<b>Error:</b> '+escapeHtml(m);
+  }
+}
+
+function sbAdvance(){
+  if(SB.done) return;
+  SB.steps++;
+  if(SB.steps>MAX_STEPS){
+    SB.done=true; SB.running=null; SB.phase='halted'; SB.err=true;
+    SB.note='<b>Step limit reached.</b> If the microtask queue never empties, the loop can never reach a macrotask, a timer, or a render. This is <b>microtask starvation</b> — in a real browser the tab would simply freeze.';
+    return;
+  }
+
+  if(!SB.started){
+    SB.started=true; SB.running={label:'script body',kind:'sync'}; SB.activePos=0;
+    SB.phase='running script';
+    SB.note='The whole script body runs <b>synchronously, top to bottom</b>. Anything it schedules just lands in a queue — nothing queued can run while the stack is busy.';
+    guard(()=>{
+      const fn = new Function('console','setTimeout','setInterval','queueMicrotask','Promise','process','setImmediate','blockFor',
+        '"use strict";\n' + $('src').value);
+      fn(...sbShims());
+    });
+    return;
+  }
+  SB.running=null; SB.activePos=-1;
+
+  /* --- these two drain at EVERY boundary, in both runtimes --- */
+  if(runtime==='node' && SB.tick.length){
+    const j=SB.tick.shift(); SB.running={label:j.label,kind:'tick'}; SB.activePos=(j.pos!==undefined?j.pos:-1);
+    SB.phase='drain nextTick';
+    SB.note='<b>process.nextTick</b> drains ahead of promise microtasks <i>and</i> ahead of the loop — after the script, after every callback, and between every phase.';
+    guard(j.run); return;
+  }
+  if(SB.micro.length){
+    const j=SB.micro.shift(); SB.running={label:j.label,kind:'micro'}; SB.activePos=(j.pos!==undefined?j.pos:-1);
+    SB.phase='drain microtasks';
+    SB.note='Running a <b>microtask</b>. The queue is drained <i>fully</i> — including anything queued during this drain — before the loop is allowed to move on.';
+    guard(j.run); return;
+  }
+
+  if(runtime==='node') return sbNodePhase();
+  return sbBrowserTurn();
+}
+
+/* ---------- BROWSER: drain microtasks, then take ONE task ---------- */
+function sbBrowserTurn(){
+  const due = SB.timers.filter(t=>t.due<=SB.now);
+  if(due.length){
+    due.sort((a,b)=>a.due-b.due || a.id-b.id);
+    due.forEach(t=>{
+      SB.timers.splice(SB.timers.indexOf(t),1);
+      SB.macro.push({label:t.label.replace(/^timer \d+ms /,'timeout '), pos:t.pos, run:t.fn});
+    });
+    SB.phase='timer expired';
+    SB.note=`The browser finished ${due.length===1?'a timer':due.length+' timers'} and moved the callback${due.length>1?'s':''} into the <b>task queue</b>. Not executed — just queued.`;
+    return;
+  }
+  if(SB.macro.length){
+    const j=SB.macro.shift(); SB.running={label:j.label,kind:'macro'}; SB.activePos=(j.pos!==undefined?j.pos:-1);
+    SB.phase='take 1 macrotask';
+    SB.note='Microtasks are empty, so the loop takes <b>exactly one</b> task. Anything <i>this</i> task queues waits for a future turn. (In the browser, a render can happen here too.)';
+    guard(j.run); return;
+  }
+  if(SB.timers.length){
+    const next=Math.min(...SB.timers.map(t=>t.due));
+    SB.now=next; SB.phase='waiting on timers';
+    SB.note=`Nothing runnable, so the loop <b>waits</b>. Virtual clock jumps to <b>${next} ms</b>, when the next timer is due.`;
+    return;
+  }
+  SB.done=true; SB.phase='idle';
+  SB.note='All queues empty, no timers pending. Nothing left to do.';
+}
+
+/* ---------- NODE: a real phase machine ----------
+   Mirrors uv_run(): freeze the clock, walk timers → poll → check → close,
+   then test whether anything is still referenced. Verified against Node v22. */
+function sbNodePhase(){
+  switch(SB.uvPhase){
+
+    case 'idle': {
+      SB.loopTime = SB.now; SB.laps++;
+      SB.uvPhase = 'timers'; SB.phase = 'iteration '+SB.laps+' · start';
+      SB.note = `<b>New loop iteration.</b> libuv <b>freezes its clock</b> at <b>${SB.now} ms</b>. Any timer created from now on has a deadline <i>after</i> this instant — so it cannot run on this lap, no matter how small its delay.`;
+      return;
+    }
+
+    case 'timers': {
+      const due = SB.timers.filter(t=>t.due<=SB.loopTime).sort((a,b)=>a.due-b.due||a.id-b.id);
+      if(due.length){
+        const t=due[0]; SB.timers.splice(SB.timers.indexOf(t),1);
+        SB.running={label:t.label.replace(/^timer \d+ms /,'timeout '),kind:'macro'};
+        SB.activePos = (t.pos!==undefined?t.pos:-1);
+        SB.phase='timers phase';
+        SB.note='<b>timers phase</b> — running a due timer callback. This phase drains <b>every</b> timer that was due at the frozen clock time before moving on. That is Node\'s rule, and it differs from the browser\'s one-task-per-turn.';
+        guard(t.fn); return;
+      }
+      SB.uvPhase='poll'; SB.phase='timers phase · done';
+      SB.note='Nothing (more) due at the frozen clock time. Moving on to <b>poll</b>.';
+      return;
+    }
+
+    case 'poll': {
+      if(SB.check.length){
+        SB.uvPhase='check'; SB.phase='poll phase';
+        SB.note='<b>poll phase</b> — there are <code>setImmediate</code> callbacks pending, so poll does <b>not block at all</b>. Straight on to check.';
+        return;
+      }
+      if(SB.timers.length){
+        const next=Math.min(...SB.timers.map(t=>t.due));
+        SB.now=next; SB.uvPhase='check'; SB.phase='poll phase · sleeping';
+        SB.note=`<b>poll phase</b> — nothing to run, so the loop <b>sleeps here</b>. This is where <code>epoll_wait</code> blocks, on the main thread. It waits exactly until the next timer is due: clock jumps to <b>${next} ms</b>.`;
+        return;
+      }
+      SB.uvPhase='check'; SB.phase='poll phase';
+      SB.note='<b>poll phase</b> — no I/O registered and no timers pending, so there is nothing to wait for.';
+      return;
+    }
+
+    case 'check': {
+      if(SB.check.length){
+        const j=SB.check.shift(); SB.running={label:j.label,kind:'check'};
+        SB.activePos=(j.pos!==undefined?j.pos:-1);
+        SB.phase='check phase';
+        SB.note='<b>check phase</b> — running a <code>setImmediate</code> callback. Check sits <i>directly after</i> poll, which is exactly why setImmediate beats setTimeout(0) when both are scheduled from inside an I/O callback.'
+          + (SB.laps<=1 && SB.timers.length ? ' <b>Caveat:</b> at the <i>top level</i> this ordering is genuinely <b>nondeterministic</b> in real Node — it depends on whether 1 ms elapsed during startup. Inside an I/O callback it is guaranteed.' : '');
+        guard(j.run); return;
+      }
+      SB.uvPhase='close'; SB.phase='check phase · done';
+      SB.note='No more immediates. On to <b>close</b>.';
+      return;
+    }
+
+    case 'close': {
+      const alive = SB.timers.length || SB.check.length || SB.tick.length || SB.micro.length;
+      SB.uvPhase='idle';
+      if(!alive){
+        SB.done=true; SB.phase='loop exited';
+        SB.note='<b>close phase</b> — then libuv asks the question that ends the program: <i>are any referenced handles or requests left?</i> <b>None.</b> The loop exits and the process ends.';
+        return;
+      }
+      SB.phase='close phase';
+      SB.note='<b>close phase</b> — then libuv checks for referenced handles. There is still work pending, so the loop <b>turns again</b> back to timers.';
+      return;
+    }
+  }
+}
+
+function sbRenderScopes(){
+  const host=$('sb-scopes');
+  if(!SB.scopes){ host.innerHTML='<div class="empty">could not read scopes from this source</div>'; return; }
+  const {root, innermost, chainUp} = SB.scopes;
+
+  let activeId=-1, chainIds=new Set();
+  if(SB.activePos>=0 && SB.running){
+    const site = innermost(SB.activePos);
+    activeId = site.id;
+    chainUp(site).forEach(s=>chainIds.add(s.id));
+  }
+
+  const draw = (s,d)=>{
+    const active = s.id===activeId;
+    const onchain = !active && chainIds.has(s.id);
+    const binds = s.decls.length
+      ? s.decls.map(x=>`<div class="bind"><b>${escapeHtml(x.name)}${x.captured?'<span class="cap">captured</span>':''}</b><i>${x.kind}</i></div>`).join('')
+      : '<div class="bind"><i>no bindings</i></div>';
+    return `<div class="scope ${d?'nest':''} ${s.kind==='block'?'block':''} ${active?'active':''} ${onchain?'onchain':''}">
+      <div class="scope-h"><span>${escapeHtml(s.name)}</span><span>${active?'running here':(onchain?'in the chain':s.kind)}</span></div>
+      ${binds}
+      ${s.kids.map(k=>draw(k,d+1)).join('')}
+    </div>`;
+  };
+  host.innerHTML = draw(root,0);
+}
+
+function sbRender(){
+  sbRenderScopes();
+  $('sb-stepno').textContent = SB.done ? 'done' : (SB.started ? 'step '+SB.steps : 'idle');
+  $('sb-note').innerHTML = SB.note || 'Write code, <b>predict the output before you run it</b>, then step through.';
+  $('sb-narrate').classList.toggle('err', !!SB.err);
+  $('sb-clock').textContent = SB.now+' ms' + (runtime==='node' && SB.laps ? ' · lap '+SB.laps : '');
+  $('sb-count').textContent = SB.steps;
+
+  $('sb-stack').innerHTML = SB.running
+    ? `<div class="frame top" data-kind="${SB.running.kind}"><span>${escapeHtml(SB.running.label)}</span><small>${SB.running.kind}</small></div>`
+    : '<div class="empty">— nothing on the stack — the loop may act</div>';
+
+  const ap=$('sb-apis');
+  ap.innerHTML = SB.timers.length
+    ? SB.timers.map(t=>`<span class="chip dormant">${escapeHtml(t.label)} <em>· due ${t.due}ms</em></span>`).join('')
+    : '<span class="chip dormant"><em>nothing pending</em></span>';
+  ap.classList.toggle('hot', SB.timers.length>0);
+
+  chips($('sb-q-tick'),SB.tick,'tick'); chips($('sb-q-micro'),SB.micro,'micro');
+  chips($('sb-q-macro'),SB.macro,'macro'); chips($('sb-q-check'),SB.check,'check');
+
+  $('sb-phase').textContent = SB.phase;
+  $('sb-rule').textContent = runtime==='node'
+    ? 'timers → poll → check → close · nextTick+micro between each'
+    : 'drain all microtasks, then take one task';
+  const busy=!!SB.running, g=$('sb-gate');
+  g.textContent = busy ? 'stack busy — loop is blocked' : (SB.done?'idle':'stack empty — loop can run');
+  g.className='gate '+(busy?'blocked':'open');
+  $('sb-rotor').classList.toggle('live', !busy && SB.started && !SB.done);
+  renderPhases('sb-phases', (SB.phase && /nextTick|microtask/i.test(SB.phase)) ? SB.phase
+                : (runtime==='node' ? SB.uvPhase : SB.phase));
+
+  const o=$('sb-out');
+  o.innerHTML = SB.out.length
+    ? SB.out.map(l=>`<div class="${l.bad?'bad':''}">${escapeHtml(l.t)}</div>`).join('')
+    : '<div class="ph">no output yet</div>';
+  o.scrollTop = o.scrollHeight;
+
+  $('sb-step').disabled = SB.done;
+  $('sb-auto').disabled = SB.done;
+}
+
+let sbTimer=null;
+function sbStopAuto(){ clearInterval(sbTimer); sbTimer=null; $('sb-auto').textContent='Auto'; }
+function sbAuto(){
+  if(sbTimer){ sbStopAuto(); return; }
+  $('sb-auto').textContent='Pause';
+  sbTimer=setInterval(()=>{ if(SB.done){ sbStopAuto(); sbRender(); } else { sbAdvance(); sbRender(); } },900);
+}
+
+const SNIPPETS = {
+  micro:{ name:'Micro vs macro (predict it!)', node:'both', code:
+`console.log('A');
+
+setTimeout(() => console.log('B'), 0);
+
+Promise.resolve().then(() => {
+  console.log('C');
+  Promise.resolve().then(() => console.log('D'));
+});
+
+console.log('E');`},
+
+  timers:{ name:'Timer ordering & the virtual clock', node:'both', code:
+`setTimeout(() => console.log('100ms'), 100);
+setTimeout(() => console.log('0ms'), 0);
+setTimeout(() => console.log('50ms'), 50);
+
+queueMicrotask(() => console.log('microtask'));
+
+console.log('sync');`},
+
+  chain:{ name:'A promise chain is one microtask per link', node:'both', code:
+`setTimeout(() => console.log('timer'), 0);
+
+Promise.resolve()
+  .then(() => console.log('step 1'))
+  .then(() => console.log('step 2'))
+  .then(() => console.log('step 3'));
+
+console.log('sync');`},
+
+  awaitex:{ name:'async / await', node:'both', code:
+`async function load() {
+  console.log('2: in load');
+  await Promise.resolve();
+  console.log('4: after await');
+}
+
+console.log('1: before');
+load();
+console.log('3: after call');`},
+
+  starve:{ name:'\u26A0 Microtask starvation', node:'both', code:
+`// Each microtask queues another one, so the
+// microtask queue NEVER empties. The loop can
+// never reach the timer below.
+//
+// In a real browser this freezes the tab.
+// Here the step limit stops it safely.
+
+setTimeout(() => console.log('I never run'), 0);
+
+function spin() {
+  Promise.resolve().then(spin);
+}
+spin();`},
+
+  safe:{ name:'…but recursive setTimeout is fine', node:'both', code:
+`// Same shape, different queue.
+// Only ONE macrotask runs per turn, so the loop
+// keeps breathing between them. No starvation.
+
+let n = 0;
+function loop() {
+  if (n++ >= 3) return;
+  console.log('turn', n);
+  setTimeout(loop, 0);
+}
+loop();
+
+Promise.resolve().then(() => console.log('microtask still runs'));`},
+
+  nodeex:{ name:'Node: nextTick vs promise vs immediate', node:'only', code:
+`setTimeout(() => console.log('timeout'), 0);
+setImmediate(() => console.log('immediate'));
+process.nextTick(() => console.log('nextTick'));
+Promise.resolve().then(() => console.log('promise'));
+
+console.log('sync');
+
+// Heads-up: at the TOP LEVEL, timeout vs immediate
+// is nondeterministic in real Node. Inside an I/O
+// callback it is guaranteed — immediate wins.`},
+
+  insideimm:{ name:'Inside setImmediate — deterministic', node:'only', code:
+`// At the TOP level, timeout vs immediate is a coin flip.
+// Scheduled from INSIDE a callback, the order is guaranteed.
+// Predict it, then step.
+
+setImmediate(() => {
+  console.log('1: inside setImmediate');
+
+  setTimeout(() => console.log('5: timeout'), 0);
+  process.nextTick(() => console.log('3: nextTick'));
+  Promise.resolve().then(() => console.log('4: promise'));
+
+  console.log('2: sync, still in the callback');
+});`},
+
+  nestedimm:{ name:'Nested setImmediate vs timer', node:'only', code:
+`// Which comes first: the nested immediate, or the timer?
+// Both were scheduled at the same moment.
+
+setImmediate(() => {
+  console.log('immediate A');
+
+  setImmediate(() => console.log('immediate B'));
+  setTimeout(() => console.log('timeout'), 0);
+  process.nextTick(() => console.log('  nextTick'));
+  Promise.resolve().then(() => console.log('  promise'));
+});`},
+
+  raceA:{ name:'Race: timeout vs immediate — fast start', node:'only', code:
+`// Classic interview question: which prints first?
+// At the top level in REAL Node this is a coin flip.
+// The sandbox has to pick one — it models the fast start.
+
+setTimeout(() => console.log('timeout'), 0);
+setImmediate(() => console.log('immediate'));
+
+// Why: setTimeout(0) is clamped to 1ms. The loop freezes
+// its clock at ~0ms on lap 1, so the timer is NOT yet due
+// and the check phase gets there first.`},
+
+  raceB:{ name:'Race: force the timeout to win', node:'only', code:
+`// Same two lines — but now we burn 5ms of synchronous
+// time before the loop is ever allowed to start.
+// The timer's 1ms deadline passes while we block, so it
+// is already due when the loop reaches its timers phase.
+//
+// blockFor() is a sandbox helper standing in for
+//   const end = Date.now() + 5; while (Date.now() < end) {}
+
+setTimeout(() => console.log('timeout'), 0);
+setImmediate(() => console.log('immediate'));
+
+blockFor(5);   // <-- try changing this to 0 and re-running`},
+
+  blank:{ name:'Blank — write your own', node:'both', code:
+`console.log('start');
+
+// try: setTimeout, queueMicrotask,
+// Promise.resolve().then(...), async / await
+
+console.log('end');`}
+};
+
+function buildSnippetMenu(){
+  const sel=$('snippet'), prev=sel.value; sel.innerHTML='';
+  Object.entries(SNIPPETS).forEach(([k,s])=>{
+    if(s.node==='only' && runtime!=='node') return;
+    const o=document.createElement('option'); o.value=k; o.textContent=s.name; sel.appendChild(o);
+  });
+  const keep=[...sel.options].some(o=>o.value===prev);
+  sel.value = keep ? prev : sel.options[0].value;
+  return sel.value;
+}
+function loadSnippet(k){ $('src').value = SNIPPETS[k].code; sbReset(); }
+
+let scopeDebounce=null;
+$('src').addEventListener('input', ()=>{
+  clearTimeout(scopeDebounce);
+  scopeDebounce=setTimeout(()=>{ sbAnalyze(); sbRenderScopes(); }, 250);
+});
+
+$('snippet').onchange = e=>loadSnippet(e.target.value);
+$('sb-run').onclick   = ()=>{ sbReset(); sbAuto(); };
+$('sb-step').onclick  = ()=>{ sbStopAuto(); sbAdvance(); sbRender(); };
+$('sb-auto').onclick  = sbAuto;
+$('sb-reset').onclick = sbReset;
+
+
+/* ============================================================
+   OWNERSHIP LAYER — who is responsible for each panel?
+   Ownership shifts with the runtime, so every entry is a
+   function of 'browser' | 'node'.
+   ============================================================ */
+const ENGINE_META = {
+  v8:     {name:'V8',        sub:'the JS engine · C++',      color:'var(--own-v8)'},
+  host:   {name:'HOST',      sub:'',                          color:'var(--own-host)'},
+  uv:     {name:'libuv',     sub:'loop & I/O · C',            color:'var(--own-uv)'},
+  kernel: {name:'Kernel',    sub:'the OS',                    color:'var(--own-kernel)'}
+};
+function hostName(){ return runtime==='node' ? 'Node core' : 'The browser'; }
+function hostSub(){  return runtime==='node' ? 'runtime · JS+C++' : 'Blink / Gecko / WebKit'; }
+const OWN_LABEL = {v8:'V8', host:()=>runtime==='node'?'Node':'the browser', uv:'libuv', kernel:'the kernel', shared:'shared'};
+function ownColor(o){ return o==='shared' ? 'var(--ink)' : ENGINE_META[o].color; }
+function ownName(o){ const l=OWN_LABEL[o]; return typeof l==='function'? l() : l; }
+
+const ST = {owns:'owns it', helps:'helps', relays:'relays', none:'not involved'};
+
+/* Each entry: owner, lede, per-engine detail, keynote.
+   Values may be functions of runtime. */
+const OWNERSHIP = {
+
+  source:{
+    title:'Source code',
+    owner:()=>'v8',
+    lede:()=>'Your source is text until <b>V8</b> parses it. Everything about turning these characters into running code — parsing, bytecode, optimisation — is the engine\'s job.',
+    eng:()=>({
+      v8:{s:'owns',p:['<b>Parser → AST</b>, lazily where it can.','<b>Ignition</b> compiles to bytecode; every function starts here.','<b>TurboFan</b> optimises hot functions to machine code — and <b>deoptimises</b> when type assumptions break.']},
+      host:{s:'relays',p:[ runtime==='node'
+        ? 'Reads the file from disk and wraps CommonJS modules in the <b>module wrapper</b> function before handing the source to V8.'
+        : 'Fetches the script over the network and hands the source to V8. <code>&lt;script&gt;</code> loading, <code>defer</code>, <code>async</code> and module resolution are the browser\'s.']},
+      uv:{s:()=>runtime==='node'?'relays':'none', p:['Performs the file read that loads the source.']},
+      kernel:{s:'relays',p:['Reads the bytes off disk or the socket.']}
+    }),
+    key:()=>({h:'Parsing is not running', p:'V8 parses lazily — a function\'s body may not be fully compiled until it is first called. That is why the <i>first</i> call to a function is slower, and why hot loops speed up after a few thousand iterations.'})
+  },
+
+  scope:{
+    title:'Scope chain',
+    owner:()=>'v8',
+    lede:()=>'Lexical environments and the scope chain are <b>pure language machinery</b>. This is all V8 — the host and the loop never touch it.',
+    eng:()=>({
+      v8:{s:'owns',p:['Creates a <b>lexical environment</b> per call and links it to its parent — that link chain <i>is</i> the scope chain.','Resolves every identifier by walking outward through it.','Enforces the <b>temporal dead zone</b> for <code>let</code>/<code>const</code>.','Keeps an environment <b>alive on the heap</b> when an inner function still references it — a closure.']},
+      host:{s:'relays',p:[ runtime==='node'
+        ? 'The CommonJS <b>module wrapper</b> means your "top-level" code is really inside a function — which is why <code>this</code> is <code>module.exports</code>, not the global object.'
+        : 'A classic <code>&lt;script&gt;</code> shares one global scope; a <code>type="module"</code> script gets its own module scope. That distinction is the browser\'s, not V8\'s.']},
+      uv:{s:'none'}, kernel:{s:'none'}
+    }),
+    key:()=>({h:'"Single-threaded JS" is a fact about V8', p:'One call stack, one scope chain being walked at a time. Neither the browser nor Node adds a second thread for your JavaScript — they add threads for <i>work</i>, never for running your code.'})
+  },
+
+  stack:{
+    title:'Call stack',
+    owner:()=>'v8',
+    lede:()=>'The call stack belongs to <b>V8</b>. It is the only place JavaScript ever runs, and there is exactly one of it.',
+    eng:()=>({
+      v8:{s:'owns',p:['Pushes a frame per call, pops on return.','Throws <code>RangeError: Maximum call stack size exceeded</code> when it overflows.','When it empties, V8 <b>returns control to the host</b> — it cannot loop by itself.']},
+      host:{s:'helps',p:[ runtime==='node'
+        ? 'Node <b>calls into V8</b> to run each callback and gets control back when the stack empties. That handover is what lets the loop turn.'
+        : 'The browser calls into V8 to run each task, and regains control when the stack empties — only then can it render.']},
+      uv:{s:()=>runtime==='node'?'relays':'none',p:['Its C callbacks are what ultimately push your JS callback onto V8\'s stack.']},
+      kernel:{s:'none'}
+    }),
+    key:()=>({h:'The stack is the gate', p:'Nothing queued — no timer, no promise, no I/O callback — can run while the stack has anything on it. Every scheduling rule in this tool is downstream of that one fact.'})
+  },
+
+  loop:{
+    title:'The event loop',
+    owner:()=>runtime==='node' ? 'uv' : 'host',
+    lede:()=>runtime==='node'
+      ? 'The loop is <b>libuv\'s</b> — the C <code>while</code> that walks <i>timers → pending → poll → check → close</i>. <b>Node</b> drives it and squeezes nextTick + microtasks into the gaps. <b>V8 has no loop at all.</b>'
+      : 'The loop belongs to <b>the browser</b>, defined by the HTML spec — not by JavaScript and not by V8. Chrome implements it in Blink, Firefox in Gecko. <b>V8 has no loop at all.</b>',
+    eng:()=>({
+      v8:{s:'none',note:'V8 only knows how to run JS until the stack empties, then hand control back. The event loop is entirely a host concept — the ECMAScript spec does not define one.'},
+      host:{s:()=>runtime==='node'?'helps':'owns', p: runtime==='node'
+        ? ['Calls <code>uv_run()</code> to start the loop.','<b>Between every phase</b>: drains the nextTick queue, then asks V8 to drain microtasks.','Decides when the process exits — when no referenced handles remain.']
+        : ['Implements the loop per the HTML processing model.','Picks which <b>task source</b> to service next — it can prioritise a click over a pending timer.','Interleaves <b>rendering</b>: style → layout → paint, with <code>requestAnimationFrame</code> just before paint.']},
+      uv:{s:()=>runtime==='node'?'owns':'none', p:['Implements the loop and the <b>phase machine</b>.','<b>Blocks in poll</b> (<code>epoll</code>/<code>kqueue</code>/<code>IOCP</code>) — where an idle Node process sleeps.'], note: runtime==='browser'?'libuv is a Node dependency. Browsers do not use it.':''},
+      kernel:{s:'relays',p:['Provides the blocking primitive the loop waits on while idle.']}
+    }),
+    key:()=>({h:'Not a separate thread', p:'The loop runs on the <b>same thread</b> as your JavaScript, <i>between</i> your callbacks — never during them. A busy call stack freezes it mid-cycle. This single fact explains almost every "why did it stall" bug.'})
+  },
+
+  apis:{
+    title:()=>runtime==='node' ? 'Node APIs / libuv' : 'Web APIs',
+    owner:()=>runtime==='node' ? 'uv' : 'host',
+    lede:()=>runtime==='node'
+      ? 'These are <b>not JavaScript</b>. <code>fs</code>, <code>net</code>, <code>crypto</code> are Node APIs, and the actual work is carried out by <b>libuv</b> — either on its thread pool or via the kernel.'
+      : 'These are <b>not JavaScript</b>. <code>setTimeout</code>, <code>fetch</code>, the DOM and events are all <b>browser</b> APIs. V8 has never heard of any of them.',
+    eng:()=>({
+      v8:{s:'none',note:'None of these exist in the ECMAScript spec. V8 provides no timers, no I/O, no DOM — the host injects them into the global object.'},
+      host:{s:()=>runtime==='node'?'helps':'owns', p: runtime==='node'
+        ? ['Node core JS (<code>lib/fs.js</code>, <code>lib/net.js</code>) validates arguments and wraps your callback.','The <b>C++ binding</b> creates a request object holding a reference to your callback, then calls libuv.']
+        : ['Implements and owns every Web API: timers, <code>fetch</code>, DOM, events, storage.','Runs the work off the main thread and queues the callback when it completes.']},
+      uv:{s:()=>runtime==='node'?'owns':'none', p:['Decides <b>how</b> to do the work: <b>thread pool</b> (files, dns.lookup, crypto, zlib) or <b>kernel async I/O</b> (sockets).','Queues the completed callback for the loop to pick up.']},
+      kernel:{s:'helps',p:['Does the real work — reading the disk, moving packets.','For sockets it can <b>notify</b> when ready; for regular files it mostly cannot, which is why the thread pool exists.']}
+    }),
+    key:()=>runtime==='node'
+      ? {h:'Two different paths', p:'<b>Files and CPU work</b> → the 4-thread pool, which saturates. <b>Network sockets</b> → the kernel poller, no threads at all. "Node is async because of the thread pool" is wrong for the network case — and that is the case a server spends all day on.'}
+      : {h:'The API is the handoff', p:'Calling <code>setTimeout</code> or <code>fetch</code> hands work to the browser and <b>returns immediately</b>. Your JS carries on. The callback only comes back through a queue, once the stack is empty.'}
+  },
+
+  qmicro:{
+    title:'Microtask queue',
+    owner:()=>'v8',
+    lede:()=>'Split ownership, and worth being precise: <b>V8 owns the queue</b> (it is the spec\'s job queue), but <b>the host decides when to drain it</b>.',
+    eng:()=>({
+      v8:{s:'owns',p:['Holds the microtask queue as an internal structure.','Enqueues a job whenever a promise settles or an <code>await</code> resumes.','Drains it fully when asked — <b>including jobs queued mid-drain</b>.']},
+      host:{s:'helps',p: runtime==='node'
+        ? ['Calls V8\'s <b>microtask checkpoint</b> after the nextTick queue, between every loop phase, and after each callback.','This is why promises reliably beat timers in Node.']
+        : ['Runs a <b>microtask checkpoint</b> whenever the JS stack empties, per the HTML processing model.','Also drains before rendering — so a promise chain resolves before the next paint.']},
+      uv:{s:'none',note: runtime==='node' ? 'The loop yields to Node between phases and Node drains microtasks in that gap. libuv itself has no concept of a promise.' : ''},
+      kernel:{s:'none'}
+    }),
+    key:()=>({h:'Structure vs timing', p:'Same queue in both runtimes, <b>different drain policy</b>. That is exactly why <code>process.nextTick</code> can cut ahead of promises in Node and has no browser equivalent — the queue is V8\'s, the schedule is the host\'s.'})
+  },
+
+  qmacro:{
+    title:()=>runtime==='node' ? 'Task queue (per-phase)' : 'Task queue (macrotasks)',
+    owner:()=>runtime==='node' ? 'uv' : 'host',
+    lede:()=>runtime==='node'
+      ? 'There is <b>no single task queue</b> in Node. What tutorials call "macrotasks" is really <b>libuv\'s per-phase queues</b> — timers, poll, check, close — each serviced in its own phase.'
+      : 'The task queue is <b>the browser\'s</b>, defined by the HTML spec. The ECMAScript spec has <i>no</i> task queue — only job (microtask) queues.',
+    eng:()=>({
+      v8:{s:'none',note:'The language spec defines microtask jobs only. Tasks, timers and the loop that services them all belong to the host.'},
+      host:{s:()=>runtime==='node'?'relays':'owns', p: runtime==='node'
+        ? ['Surfaces these callbacks through Node APIs, but the queues themselves are libuv\'s.']
+        : ['Defines multiple <b>task sources</b> — timers, user interaction, DOM manipulation, networking — each with its own queue.','<b>Chooses</b> which source to service next, so a click can be prioritised over a pending timer.']},
+      uv:{s:()=>runtime==='node'?'owns':'none', p:['Owns the per-phase queues: the <b>timers min-heap</b>, pending, poll watchers, check, close.','Services exactly one phase\'s queue at a time as the loop turns.']},
+      kernel:{s:'none'}
+    }),
+    key:()=>runtime==='node'
+      ? {h:'Why setTimeout and setImmediate are not one FIFO', p:'They live in <b>different phases</b> — timers vs check. You cannot reason about them as a single ordered queue. "The macrotask queue" is a browser-shaped simplification that does not map onto Node.'}
+      : {h:'"One task queue" is a simplification', p:'The real model is several queues plus a scheduling policy. It is a fine teaching model for ordering, but it is why the spec never promises a strict FIFO across different kinds of task.'}
+  },
+
+  qtick:{
+    title:'nextTick queue',
+    owner:()=>'host',
+    lede:()=>'<b>Pure Node.</b> Not a JavaScript feature, not a libuv feature — Node maintains this queue itself and drains it ahead of everything else.',
+    eng:()=>({
+      v8:{s:'none',note:'process.nextTick does not exist in the language. V8 has never heard of it, and there is no browser equivalent.'},
+      host:{s:'owns',p:['Maintains the nextTick queue as its own structure.','Drains it <b>first</b> — before V8\'s microtasks, before each phase, after every callback.','Uses it internally to defer work to "just after this operation, before anything else."']},
+      uv:{s:'none'}, kernel:{s:'none'}
+    }),
+    key:()=>({h:'The highest-priority footgun', p:'Because it drains before microtasks <i>and</i> before the loop advances, recursively queueing <code>process.nextTick</code> starves the loop completely — worse than a promise chain, because it also beats promises.'})
+  },
+
+  qcheck:{
+    title:'Check queue',
+    owner:()=>'uv',
+    lede:()=>'<b>libuv</b> owns the mechanism — the <b>check phase</b>. Node only provides the <code>setImmediate</code> API. Sitting right after <code>poll</code> is what gives it its ordering guarantee.',
+    eng:()=>({
+      v8:{s:'none'},
+      host:{s:'helps',p:['Provides <code>setImmediate</code> and the <b>Immediate</b> objects.']},
+      uv:{s:'owns',p:['Runs these callbacks in the <b>check phase</b>, immediately after <code>poll</code>.']},
+      kernel:{s:'none'}
+    }),
+    key:()=>({h:'Why it beats setTimeout(0) — sometimes', p:'Inside an <b>I/O callback</b> you are in <i>poll</i>, and <i>check</i> is the very next stop — <code>setImmediate</code> wins, guaranteed. At the <b>top level</b> the order is <b>nondeterministic</b>, because it depends on whether ~1 ms elapsed before the loop first reached timers.'})
+  },
+
+  console:{
+    title:'Console',
+    owner:()=>'host',
+    lede:()=>'Deceptively deep. <b>V8</b> formats the values, <b>the host</b> owns the <code>console</code> object and the stream, and the <b>kernel</b> puts characters on screen.',
+    eng:()=>({
+      v8:{s:'helps',p:['Formats values into strings' + (runtime==='node' ? ' via <code>util.inspect</code>.' : '.')]},
+      host:{s:'owns',p: runtime==='node'
+        ? ['Owns <code>lib/console.js</code> and writes the line to the <b>stdout stream</b>.','Writes to a <b>TTY</b> are synchronous; writes to a <b>file or pipe</b> may go through libuv asynchronously.']
+        : ['Owns the console object and the DevTools panel that renders it.','Logged objects may be shown <b>live</b> — expanding one later can show values that changed after the log call. A classic debugging trap.']},
+      uv:{s:()=>runtime==='node'?'relays':'none',p:['Carries the async write when stdout is a pipe or file.']},
+      kernel:{s:'helps',p:['Performs the actual <code>write()</code> to the terminal or file descriptor.']}
+    }),
+    key:()=>runtime==='node'
+      ? {h:'Sometimes sync, sometimes not', p:'<code>console.log</code> can subtly change timing depending on where stdout points — synchronous to a terminal, potentially async to a pipe. Worth knowing when you redirect logs and the ordering shifts.'}
+      : {h:'It is not part of JavaScript', p:'<code>console</code> appears in no ECMAScript spec. It is a host object, which is why its exact behaviour differs between browsers and Node.'}
+  }
+};
+
+/* resolve a possibly-function value */
+const rv = x => (typeof x==='function' ? x() : x);
+
+function engineFor(key){
+  if(key==='host') return {name:hostName(), sub:hostSub(), color:ENGINE_META.host.color};
+  return ENGINE_META[key];
+}
+
+let popOpen=null;
+function openPop(key, btn){
+  const d = OWNERSHIP[key]; if(!d) return;
+  closePop();
+  popOpen = key;
+  if(btn) btn.setAttribute('aria-expanded','true');
+
+  const owner = rv(d.owner);
+  const eng = rv(d.eng);
+  const k = rv(d.key);
+  const oc = ownColor(owner);
+
+  const cards = ['v8','host','uv','kernel'].map(ek=>{
+    const E = engineFor(ek);
+    const info = eng[ek] || {s:'none'};
+    const st = rv(info.s);
+    const body = (st==='none')
+      ? `<p class="nn">${info.note ? info.note : 'Not involved.'}</p>`
+      : `<ul>${(info.p||[]).map(x=>`<li>${x}</li>`).join('')}</ul>` +
+        (info.note ? `<p class="nn" style="margin-top:6px">${info.note}</p>` : '');
+    return `<div class="ec ${st==='owns'?'owns':''} ${st==='none'?'none':''}" style="--ec:${E.color}">
+      <div class="ec-h"><i></i><b>${E.name}</b><span class="st ${st}">${ST[st]}</span></div>
+      <div style="font-family:var(--mono);font-size:9px;color:var(--ink-3);margin:-3px 0 5px">${E.sub}</div>
+      ${body}</div>`;
+  }).join('');
+
+  const back = document.createElement('div');
+  back.className='pop-back';
+  back.innerHTML = `<div class="pop" role="dialog" aria-modal="true" aria-label="Ownership detail" style="--own:${oc}">
+    <div class="pop-h">
+      <span class="ownpill">${ownName(owner)} owns this</span>
+      <h3>${rv(d.title)}</h3>
+      <button data-close>close ✕</button>
+    </div>
+    <div class="pop-b">
+      <p class="pop-lede">${rv(d.lede)}</p>
+      <div class="ecards">${cards}</div>
+      <div class="pop-key"><b>${k.h}</b><p>${k.p}</p></div>
+      <div class="ownlegend">
+        <span><i style="background:var(--own-v8)"></i>V8</span>
+        <span><i style="background:var(--own-host)"></i>${hostName()}</span>
+        <span><i style="background:var(--own-uv)"></i>libuv</span>
+        <span><i style="background:var(--own-kernel)"></i>kernel</span>
+      </div>
+    </div></div>`;
+  back.addEventListener('click', e=>{ if(e.target===back || e.target.hasAttribute('data-close')) closePop(); });
+  document.body.appendChild(back);
+}
+function closePop(){
+  document.querySelectorAll('.pop-back').forEach(el=>el.remove());
+  document.querySelectorAll('.info').forEach(b=>b.setAttribute('aria-expanded','false'));
+  popOpen=null;
+}
+
+/* inject info buttons + owner strips into every card that has an ownership entry */
+function wireOwnership(){
+  // sub-queue rows: small icon + owner name inline in the q-h row
+  document.querySelectorAll('[data-ownq]').forEach(q=>{
+    const key=q.dataset.ownq, d=OWNERSHIP[key]; if(!d) return;
+    const owner=rv(d.owner), oc=ownColor(owner);
+    const head=q.querySelector('.q-h'); if(!head) return;
+    let small=head.querySelector('small');
+    let btn=head.querySelector('.info');
+    if(!btn){
+      btn=document.createElement('button');
+      btn.className='info'; btn.type='button'; btn.textContent='i';
+      btn.setAttribute('aria-expanded','false');
+      btn.style.width='15px'; btn.style.height='15px'; btn.style.fontSize='9px';
+      head.appendChild(btn);
+      btn.addEventListener('click', e=>{ e.stopPropagation(); openPop(key, btn); });
+    }
+    btn.style.setProperty('--own', oc);
+    btn.title = ownName(owner)+' owns this — click for detail';
+    btn.setAttribute('aria-label', rv(d.title)+' — owned by '+ownName(owner)+'. Click for detail.');
+    if(small){
+      if(small.dataset.base === undefined) small.dataset.base = small.textContent;
+      small.innerHTML = small.dataset.base + ' · <b style="color:'+oc+'">'+ownName(owner)+'</b>';
+    }
+  });
+
+  document.querySelectorAll('[data-own]').forEach(card=>{
+    const key = card.dataset.own;
+    const d = OWNERSHIP[key]; if(!d) return;
+    const owner = rv(d.owner), oc = ownColor(owner);
+    const h2 = card.querySelector('h2');
+
+    let btn = h2.querySelector('.info');
+    if(!btn){
+      btn = document.createElement('button');
+      btn.className='info'; btn.type='button';
+      btn.setAttribute('aria-expanded','false');
+      btn.textContent='i';
+      h2.appendChild(btn);
+      btn.addEventListener('click', e=>{ e.stopPropagation(); openPop(key, btn); });
+    }
+    btn.style.setProperty('--own', oc);
+    btn.title = ownName(owner)+' owns this — click for detail';
+    btn.setAttribute('aria-label', rv(d.title)+' — owned by '+ownName(owner)+'. Click for detail.');
+
+    let strip = card.querySelector('.ownstrip');
+    if(!strip){
+      strip = document.createElement('div');
+      strip.className='ownstrip';
+      h2.insertAdjacentElement('afterend', strip);
+    }
+    strip.style.setProperty('--own', oc);
+    strip.innerHTML = `<i class="osw"></i>owned by <b>${ownName(owner)}</b>`;
+  });
+}
+
+document.addEventListener('keydown', e=>{ if(e.key==='Escape') closePop(); });
+
+/* ============================================================
+   Tabs + runtime
+   ============================================================ */
+function setTab(t){
+  const guided = t==='guided';
+  $('tab-guided').setAttribute('aria-selected', guided);
+  $('tab-sandbox').setAttribute('aria-selected', !guided);
+  $('view-guided').hidden = !guided;
+  $('view-sandbox').hidden = guided;
+  gStop(); sbStopAuto();
+}
+$('tab-guided').onclick  = ()=>setTab('guided');
+$('tab-sandbox').onclick = ()=>setTab('sandbox');
+
+function setRuntime(r){
+  runtime=r;
+  const node = r==='node';
+  $('rt-browser').setAttribute('aria-pressed', !node);
+  $('rt-node').setAttribute('aria-pressed', node);
+
+  $('api-title').innerHTML = node
+    ? 'Node APIs / libuv <span>thread pool + kernel</span>' : 'Web APIs <span>provided by the browser</span>';
+  $('sb-api-title').innerHTML = node
+    ? 'Node APIs / libuv <span>timers pending</span>' : 'Web APIs <span>timers pending</span>';
+  $('macro-label').textContent = node ? 'Timers queue (macrotasks)' : 'Task queue (macrotasks)';
+
+  document.documentElement.style.setProperty('--accent', node ? '#0E6E63' : '#6D4AC7');
+
+  document.querySelectorAll('.g-tick,.g-check,.s-tick,.s-check')
+    .forEach(el=>{ el.style.display = node ? '' : 'none'; });
+
+  $('hint').innerHTML = node
+    ? 'Available: <code>console.log</code> <code>setTimeout</code> <code>queueMicrotask</code> <code>Promise</code> <code>async/await</code> <code>process.nextTick</code> <code>setImmediate</code> <code>blockFor(ms)</code>. Not available: <code>setInterval</code>, <code>fetch</code>, DOM.'
+    : 'Available: <code>console.log</code> <code>setTimeout</code> <code>queueMicrotask</code> <code>Promise</code> <code>async/await</code> <code>blockFor(ms)</code>. Not available: <code>setInterval</code>, <code>fetch</code>, DOM. Switch to <b>Node</b> for <code>process.nextTick</code> and <code>setImmediate</code>.';
+
+  buildMenu(); gLoad(gKey);
+  loadSnippet(buildSnippetMenu());
+  closePop();
+  wireOwnership();
+}
+
+$('rt-browser').onclick = ()=>setRuntime('browser');
+$('rt-node').onclick    = ()=>setRuntime('node');
+
+document.addEventListener('keydown', e=>{
+  if(['SELECT','TEXTAREA','INPUT'].includes(e.target.tagName)) return;
+  const guided = !$('view-guided').hidden;
+  if(e.key==='ArrowRight'){ e.preventDefault(); if(guided){gStop();gNext();} else {sbStopAuto();sbAdvance();sbRender();} }
+  if(e.key==='ArrowLeft' && guided){ e.preventDefault(); gStop(); gPrev(); }
+  if(e.key===' '){ e.preventDefault(); guided ? gPlay() : sbAuto(); }
+});
+
+setRuntime('browser');
+</script>
+<footer class="site-footer">Built with AI from a prompt by <a href="https://github.com/gsmithun4" target="_blank" rel="noopener noreferrer">gsmithun4</a>.</footer>
+</body>
+</html>

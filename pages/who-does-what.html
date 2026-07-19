@@ -1,0 +1,401 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Who Does What — V8 · Node · libuv · Kernel</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --paper:#E6E8E3; --panel:#FAFAF8; --panel-2:#F1F2EE;
+    --ink:#191D1E; --ink-2:#5C6461; --ink-3:#8E9591; --rule:#CBD0C8;
+    --v8:#191D1E;      /* V8 */
+    --node:#6D4AC7;    /* Node core */
+    --uv:#0E6E63;      /* libuv */
+    --kernel:#B03A3A;  /* kernel / OS */
+    --dormant:#9AA29D;
+    --hl:#FFF3C4;
+    --shadow:0 1px 0 rgba(25,29,30,.06), 0 2px 8px rgba(25,29,30,.05);
+    --mono:'IBM Plex Mono',ui-monospace,monospace;
+    --disp:'Space Grotesk',system-ui,sans-serif;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0}
+  body{
+    background:var(--paper);
+    background-image:linear-gradient(var(--rule) 1px,transparent 1px),linear-gradient(90deg,var(--rule) 1px,transparent 1px);
+    background-size:28px 28px; background-position:-1px -1px;
+    color:var(--ink); font-family:var(--disp); -webkit-font-smoothing:antialiased; padding:18px;
+  }
+  .wrap{max-width:1340px;margin:0 auto}
+
+  header{display:flex;flex-wrap:wrap;gap:16px;align-items:flex-end;justify-content:space-between;
+    padding-bottom:14px;border-bottom:1.5px solid var(--ink)}
+  h1{font-size:clamp(19px,2.4vw,27px);font-weight:700;letter-spacing:-.02em;margin:0;line-height:1.05}
+  h1 em{font-style:normal;color:var(--ink-3)}
+  .sub{font-family:var(--mono);font-size:11px;color:var(--ink-2);margin-top:5px}
+
+  .narrate{display:flex;gap:12px;align-items:center;background:var(--ink);color:#F2F3F0;border-radius:2px;
+    padding:11px 14px;margin:14px 0;min-height:48px}
+  .owns-pill{font-family:var(--mono);font-size:10.5px;font-weight:600;padding:5px 9px;border-radius:2px;white-space:nowrap;
+    background:rgba(255,255,255,.14)}
+  .narrate p{margin:0;font-size:13.5px;line-height:1.45}
+  .narrate b{font-weight:600;border-bottom:1.5px solid rgba(255,255,255,.45)}
+
+  .layout{display:grid;grid-template-columns:minmax(0,235px) minmax(0,1fr);gap:14px;align-items:start}
+
+  /* concept rail */
+  .rail{display:flex;flex-direction:column;gap:2px}
+  .rail-group{font-family:var(--mono);font-size:9.5px;font-weight:600;letter-spacing:.09em;text-transform:uppercase;
+    color:var(--ink-3);margin:12px 4px 4px}
+  .rail-group:first-child{margin-top:0}
+  .cbtn{font-family:var(--disp);font-size:13px;text-align:left;width:100%;padding:8px 11px;border-radius:2px;
+    border:1.5px solid transparent;background:transparent;color:var(--ink-2);cursor:pointer;
+    display:flex;align-items:center;gap:8px;transition:background .1s ease}
+  .cbtn:hover{background:var(--panel-2);color:var(--ink)}
+  .cbtn[aria-pressed="true"]{background:var(--panel);border-color:var(--ink);color:var(--ink);font-weight:600;
+    box-shadow:inset 4px 0 0 var(--own,var(--ink))}
+  .cbtn .odot{width:8px;height:8px;border-radius:50%;flex:0 0 auto;background:var(--own,var(--ink-3))}
+
+  /* flow ribbon */
+  .flow{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:12px;
+    font-family:var(--mono);font-size:11px;color:var(--ink-3)}
+  .flow .fstep{padding:4px 9px;border-radius:2px;border:1.5px solid var(--rule);background:var(--panel);color:var(--ink-2)}
+  .flow .fstep.on{border-color:var(--ink);color:var(--ink);font-weight:600}
+  .flow .farr{color:var(--ink-3)}
+
+  /* engine cards */
+  .cards{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+  .ecard{border:1.5px solid var(--rule);border-radius:2px;background:var(--panel);overflow:hidden;
+    transition:border-color .12s ease, opacity .12s ease;box-shadow:var(--shadow)}
+  .ecard.none{opacity:.5}
+  .ecard.owns{border-color:var(--ec);border-width:2px}
+  .ecard>h2{font-family:var(--mono);font-size:11px;font-weight:600;letter-spacing:.04em;
+    margin:0;padding:9px 12px;border-bottom:1.5px solid var(--rule);display:flex;align-items:center;gap:9px}
+  .ecard.owns>h2{border-bottom-color:var(--ec)}
+  .ecard .swatch{width:11px;height:11px;border-radius:2px;background:var(--ec);flex:0 0 auto}
+  .ecard .ename{font-weight:700;font-size:13px;font-family:var(--disp)}
+  .ecard .elayer{font-family:var(--mono);font-size:9px;color:var(--ink-3);margin-left:auto;letter-spacing:.03em}
+  .state{font-family:var(--mono);font-size:9px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;
+    padding:2px 7px;border-radius:999px;border:1.5px solid}
+  .state.owns{background:var(--ec);color:#fff;border-color:var(--ec)}
+  .state.helps{color:var(--ec);border-color:var(--ec)}
+  .state.relays{color:var(--ink-2);border-color:var(--rule)}
+  .state.none{color:var(--ink-3);border-color:var(--rule)}
+  .ebody{padding:10px 12px}
+  .ebody ul{margin:0;padding-left:15px}
+  .ebody li{font-size:12.5px;line-height:1.5;margin-bottom:5px;color:var(--ink-2)}
+  .ebody li:last-child{margin-bottom:0}
+  .ebody li b{color:var(--ink);font-weight:600}
+  .ebody code{font-family:var(--mono);font-size:11px;background:var(--panel-2);border:1px solid var(--rule);
+    border-radius:2px;padding:0 3px}
+  .ebody .ninvolved{font-family:var(--mono);font-size:11px;color:var(--ink-3);font-style:italic}
+
+  .keynote{border:1.5px solid var(--ink);border-radius:2px;background:var(--hl);padding:10px 12px;margin-top:12px}
+  .keynote b{font-family:var(--mono);font-size:9.5px;letter-spacing:.08em;text-transform:uppercase;display:block;margin-bottom:4px}
+  .keynote p{margin:0;font-size:12.5px;line-height:1.55}
+  .keynote code{font-family:var(--mono);font-size:11px;background:var(--panel);border:1px solid var(--rule);border-radius:2px;padding:0 3px}
+
+  .legend{display:flex;gap:16px;flex-wrap:wrap;margin-top:16px;padding-top:11px;border-top:1.5px solid var(--ink);
+    font-family:var(--mono);font-size:10.5px;color:var(--ink-2)}
+  .legend span{display:flex;align-items:center;gap:6px}
+  .legend .sw{width:10px;height:10px;border-radius:2px;flex:0 0 auto}
+  .legend .st{padding:1px 6px;border-radius:999px;border:1.5px solid var(--ink-3);font-size:9px;font-weight:600;text-transform:uppercase;letter-spacing:.05em}
+
+  .site-footer{
+    margin-top:16px;
+    padding-top:10px;
+    border-top:1.5px solid var(--ink);
+    font-family:var(--mono);
+    font-size:10.5px;
+    color:var(--ink-2);
+  }
+  .site-footer a{color:var(--ink);text-decoration-thickness:1.5px}
+
+  @media (max-width:860px){
+    .layout{grid-template-columns:1fr}
+    .rail{flex-flow:row wrap;gap:5px}
+    .rail-group{width:100%}
+    .cbtn{width:auto}
+    .cards{grid-template-columns:1fr}
+  }
+  @media (prefers-reduced-motion:reduce){ *{transition:none!important} }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <div>
+      <h1>Who Does What <em>— V8 · Node · libuv · kernel</em></h1>
+      <div class="sub">pick a concept — see which engine owns it, which ones help, and which aren't involved at all</div>
+    </div>
+  </header>
+
+  <div class="narrate">
+    <span class="owns-pill" id="owns-pill"></span>
+    <p id="note"></p>
+  </div>
+
+  <div class="layout">
+    <nav class="rail" id="rail" aria-label="Concepts"></nav>
+
+    <div>
+      <div class="flow" id="flow"></div>
+      <div class="cards" id="cards"></div>
+      <div class="keynote" id="keynote"></div>
+    </div>
+  </div>
+
+  <div class="legend">
+    <span><i class="sw" style="background:var(--v8)"></i>V8 · runs your JS</span>
+    <span><i class="sw" style="background:var(--node)"></i>Node core · the runtime</span>
+    <span><i class="sw" style="background:var(--uv)"></i>libuv · loop &amp; I/O</span>
+    <span><i class="sw" style="background:var(--kernel)"></i>kernel · the OS</span>
+    <span style="margin-left:6px"><i class="st">owns</i> primary</span>
+    <span><i class="st">helps</i> does part</span>
+    <span><i class="st">relays</i> passes through</span>
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+
+const ENGINES = [
+  { key:'v8',     name:'V8',        layer:'engine · C++',   color:'var(--v8)' },
+  { key:'node',   name:'Node core', layer:'runtime · JS+C++',color:'var(--node)' },
+  { key:'uv',     name:'libuv',     layer:'loop · C',       color:'var(--uv)' },
+  { key:'kernel', name:'Kernel',    layer:'OS',             color:'var(--kernel)' }
+];
+const OWNER_LABEL = { v8:'V8', node:'Node', uv:'libuv', kernel:'the kernel', shared:'shared' };
+const OWNER_COLOR = { v8:'var(--v8)', node:'var(--node)', uv:'var(--uv)', kernel:'var(--kernel)', shared:'var(--ink)' };
+
+/* state per engine: owns | helps | relays | none */
+const C = {};
+
+C.stack = { name:'Call stack & scope', group:'JavaScript language', owner:'v8',
+  flow:['v8'],
+  note:'The call stack, execution contexts and the scope chain are pure language machinery — this is <b>all V8</b>. Node and libuv never touch it.',
+  key:{h:'The point', p:'Everything about <i>running</i> your code — pushing frames, resolving names up the scope chain, enforcing the TDZ — happens inside V8 on one thread. "Single-threaded JS" is a fact about V8, not about Node.'},
+  eng:{
+    v8:{s:'owns',p:['Maintains the <b>single call stack</b> — one per thread, and Node runs your JS on exactly one.','Creates an <b>execution context / lexical environment</b> per function call and links it to its parent — the scope chain.','Resolves every identifier by walking that chain; enforces the <b>temporal dead zone</b> for <code>let</code>/<code>const</code>.']},
+    node:{s:'relays',p:['Wraps each CommonJS module in a function (the <b>module wrapper</b>) — that becomes the bottom frame — then hands the source to V8.']},
+    uv:{s:'none'}, kernel:{s:'none'}
+  }};
+
+C.heap = { name:'Heap & closures', group:'JavaScript language', owner:'v8',
+  flow:['v8'],
+  note:'Objects, closures and the memory they live in are <b>V8\'s</b>. A closure is just a lexical environment V8 keeps reachable after its stack frame is gone.',
+  key:{h:'Closures = retained scope', p:'When an inner function survives, V8 keeps its parent environment alive on the heap instead of discarding it at return. That is the whole mechanism — and the whole leak risk.'},
+  eng:{
+    v8:{s:'owns',p:['Allocates <b>all JS objects, functions and closures</b> in its heap.','Keeps a closed-over environment <b>reachable</b> once an inner function references it — the frame pops, the scope does not.','Splits memory into <b>new space</b> (short-lived) and <b>old space</b> (survivors).']},
+    node:{s:'helps',p:['<code>Buffer</code> backing memory is allocated <b>off the V8 heap</b> (C++ land), so large buffers dodge GC pressure — a Node-specific detail.']},
+    uv:{s:'none'}, kernel:{s:'relays',p:['Hands raw pages to V8 via <code>mmap</code>/<code>malloc</code> — but knows nothing about JS objects.']}
+  }};
+
+C.gc = { name:'Garbage collection', group:'JavaScript language', owner:'v8',
+  flow:['v8'],
+  note:'GC is <b>entirely V8</b>. And the pauses land on <i>your</i> thread — this is not a free background service.',
+  key:{h:'GC costs your thread', p:'The <b>scavenger</b> (new space) is fast and frequent; <b>mark-sweep-compact</b> (old space) is heavier. V8 does some of the work on helper threads, but the stop-the-world pauses freeze the same thread your callbacks run on.'},
+  eng:{
+    v8:{s:'owns',p:['Runs the <b>scavenger</b> for new space and <b>mark-sweep-compact</b> for old space.','Pauses execution to collect — <b>on the main thread</b>, so long GC pauses look like latency spikes.','Offloads some marking/compaction to its own helper threads, but the pause is yours.']},
+    node:{s:'none'}, uv:{s:'none'}, kernel:{s:'relays',p:['Reclaims pages V8 returns; otherwise uninvolved.']}
+  }};
+
+C.micro = { name:'Microtask queue', group:'Scheduling', owner:'v8',
+  flow:['v8','node'],
+  note:'The microtask queue is a <b>V8</b> structure — but <b>Node</b> decides <i>when</i> to drain it. Ownership of the data and ownership of the timing are split.',
+  key:{h:'Structure vs timing', p:'V8 owns the queue and the jobs (per the ECMAScript spec\'s <code>HostEnqueuePromiseJob</code>). The host decides when to run a <b>microtask checkpoint</b>. In a browser that\'s "when the stack empties"; in Node it\'s "after nextTick, between every phase, and after every callback." Same queue, different drain policy.'},
+  eng:{
+    v8:{s:'owns',p:['Holds the <b>microtask queue</b> as an internal data structure.','Enqueues a job whenever a promise settles (<code>.then</code>, resolved <code>await</code>).','Drains it — running every job, <b>including ones queued mid-drain</b> — when the host asks.']},
+    node:{s:'helps',p:['Calls V8\'s <b>microtask checkpoint</b> at the right moments: after the <code>nextTick</code> queue, between loop phases, and after each callback.','This is why promises reliably beat timers in Node.']},
+    uv:{s:'none',note:'The loop yields to Node between phases; Node drains microtasks in that gap. libuv itself has no concept of a promise.'}, kernel:{s:'none'}
+  }};
+
+C.promise = { name:'Promises & async/await', group:'Scheduling', owner:'v8',
+  flow:['v8','node'],
+  note:'Promises are a <b>language feature</b> — they live in V8 and never require I/O. <code>await</code> is just sugar over a microtask continuation.',
+  key:{h:'A promise never leaves V8', p:'<code>Promise.resolve().then(fn)</code> touches no binding, no thread, no kernel. It enqueues a microtask in V8 and Node drains it. This is why an infinite promise chain can starve the very loop libuv is trying to run.'},
+  eng:{
+    v8:{s:'owns',p:['Implements the <b>Promise</b> object and <code>async</code>/<code>await</code> desugaring.','Splits an async function at each <code>await</code> into a <b>microtask continuation</b> that resumes with its scope intact.']},
+    node:{s:'helps',p:['Drains the microtask queue at the right time — but adds no promise machinery of its own.','<code>util.promisify</code> and the <code>fs/promises</code> wrappers are Node conveniences layered on top.']},
+    uv:{s:'none'}, kernel:{s:'none'}
+  }};
+
+C.nexttick = { name:'process.nextTick', group:'Scheduling', owner:'node',
+  flow:['node'],
+  note:'This one is <b>pure Node</b>. It is not a JavaScript feature and not a libuv feature — Node maintains the queue itself, and drains it ahead of everything.',
+  key:{h:'Highest priority, Node-only', p:'The <code>nextTick</code> queue drains <b>before</b> V8\'s microtasks and before the loop advances. There is no browser equivalent. Recursively queueing <code>nextTick</code> starves the loop entirely — the classic footgun.'},
+  eng:{
+    v8:{s:'none',note:'process.nextTick does not exist in the language. V8 has never heard of it.'},
+    node:{s:'owns',p:['Maintains the <b>nextTick queue</b> as its own structure.','Drains it <b>first</b> — before microtasks, before each phase, after every callback.','Uses it internally to defer callbacks to "just after this operation, before anything else."']},
+    uv:{s:'none'}, kernel:{s:'none'}
+  }};
+
+C.timers = { name:'setTimeout / setInterval', group:'Scheduling', owner:'shared',
+  flow:['node','uv'],
+  note:'Split ownership: <b>Node</b> gives you the API and tracks the timers; <b>libuv</b> owns the <i>clock and the phase</i> that actually fire them. V8 isn\'t involved — <code>setTimeout</code> is not JavaScript.',
+  key:{h:'The delay is a minimum', p:'libuv checks its timer heap only when the loop reaches the <b>timers phase</b>. If the stack was busy, it arrives late and your callback fires late. A 10 ms timer behind a 3-second blocking loop fires at 3 seconds.'},
+  eng:{
+    v8:{s:'none',note:'setTimeout is a host API, not a language feature.'},
+    node:{s:'helps',p:['Provides <code>setTimeout</code>/<code>setInterval</code> (<code>lib/timers.js</code>) and the <b>Timeout</b> objects.','Groups timers by duration and processes the due ones when libuv\'s timers phase fires.']},
+    uv:{s:'owns',p:['Keeps the <b>timers min-heap</b> and the loop\'s <b>timers phase</b>.','Computes how long <code>poll</code> should block from the <b>nearest due timer</b>, so the process sleeps instead of spinning.']},
+    kernel:{s:'relays',p:['Provides the clock/timeout primitive libuv blocks on; does no scheduling itself.']}
+  }};
+
+C.immediate = { name:'setImmediate', group:'Scheduling', owner:'uv',
+  flow:['node','uv'],
+  note:'<b>libuv</b> owns the mechanism — the <b>check phase</b>. Node just provides the API. Sitting right after <code>poll</code> is what gives it its ordering guarantee.',
+  key:{h:'Why it beats setTimeout(0) inside I/O', p:'From inside an I/O callback you are in the <b>poll</b> phase, and <b>check</b> is the very next stop — so <code>setImmediate</code> always wins there. At the top level, though, timers-vs-immediate is nondeterministic.'},
+  eng:{
+    v8:{s:'none'},
+    node:{s:'helps',p:['Provides <code>setImmediate</code> and the <b>Immediate</b> objects.']},
+    uv:{s:'owns',p:['Runs these callbacks in the <b>check phase</b>, immediately after <code>poll</code>.']},
+    kernel:{s:'none'}
+  }};
+
+C.loop = { name:'The event loop & phases', group:'Scheduling', owner:'uv',
+  flow:['uv','node'],
+  note:'The loop itself is <b>libuv</b> — the <code>while</code> that walks <i>timers → pending → poll → check → close</i>. <b>Node</b> drives it and squeezes nextTick + microtasks into the gaps. V8 has no loop at all.',
+  key:{h:'Not a separate thread', p:'The loop runs on the <b>main thread</b>, <i>between</i> your callbacks — never during them. A busy call stack freezes it mid-cycle. That single fact explains almost every "why did my server stall" bug.'},
+  eng:{
+    v8:{s:'none',note:'V8 only knows how to run JS until the stack empties, then return. It cannot loop by itself — the host must keep calling it.'},
+    node:{s:'helps',p:['Calls <code>uv_run()</code> to start the loop.','<b>Between every phase</b>, drains the nextTick queue then asks V8 to drain microtasks.','Decides when the process should exit (no handles left).']},
+    uv:{s:'owns',p:['Implements the <b>loop</b> and the phase machine.','<b>Blocks in poll</b> (<code>epoll_wait</code>/<code>kqueue</code>/<code>IOCP</code>) — this is where an idle Node process sleeps.','Invokes the C callbacks that ultimately call back into V8.']},
+    kernel:{s:'relays',p:['Provides the blocking primitive libuv waits on in <code>poll</code>.']}
+  }};
+
+C.taskq = { name:'The "task queue"', group:'Scheduling', owner:'uv',
+  flow:['uv'],
+  note:'There is <b>no single task queue</b> in Node. What tutorials call "macrotasks" is really libuv\'s <i>per-phase</i> queues — timers, poll, check, close — each serviced in its own phase.',
+  key:{h:'Why setTimeout and setImmediate can\'t be one FIFO', p:'They live in <b>different phases</b> (timers vs check), so you cannot reason about them as a single ordered queue. "The macrotask queue" is a browser-flavoured simplification that doesn\'t map onto Node.'},
+  eng:{
+    v8:{s:'none',note:'The spec defines job (microtask) queues only. It has no task queue and no event loop — those belong to the host.'},
+    node:{s:'relays',p:['Surfaces the callbacks through its APIs, but the queues themselves are libuv\'s.']},
+    uv:{s:'owns',p:['Owns the <b>per-phase queues</b>: timers heap, pending, poll watchers, check, close.','Services exactly one phase\'s queue at a time as the loop turns.']},
+    kernel:{s:'none'}
+  }};
+
+C.file = { name:'File I/O — fs.readFile', group:'I/O paths', owner:'uv',
+  flow:['node','uv','kernel','v8'],
+  note:'All four take part. <b>Node</b> gives the API, <b>libuv</b> routes it to the <b>thread pool</b>, the <b>kernel</b> does the blocking read on a worker thread, and <b>V8</b> runs your callback at the end.',
+  key:{h:'Files use the pool, not the kernel poller', p:'There is no portable async syscall for reading a regular file — <code>read(2)</code> blocks. So libuv hands file work to its <b>4-thread pool</b>. Fire 8 reads at once and only 4 run at a time. (See the thread-pool lab.)'},
+  eng:{
+    v8:{s:'helps',p:['Runs <code>fs.readFile</code> (it\'s JS) on the stack, and later runs <b>your callback</b>.','Holds the callback + its closure in the heap while the read is in flight.']},
+    node:{s:'helps',p:['<code>lib/fs.js</code> validates the path and wraps your callback.','The C++ binding creates an <code>FSReqCallback</code> and calls <code>uv_fs_read()</code>.']},
+    uv:{s:'owns',p:['Dispatches the read to a <b>thread-pool worker</b>.','On completion, queues your callback for the <b>poll</b> phase and frees the thread.']},
+    kernel:{s:'helps',p:['Performs the actual <b>blocking <code>read()</code></b> — but on the pool\'s worker thread, so the main thread stays free.']}
+  }};
+
+C.net = { name:'Network I/O — sockets', group:'I/O paths', owner:'kernel',
+  flow:['node','uv','kernel','v8'],
+  note:'The big one. Network I/O is handled by the <b>kernel\'s</b> own readiness system — <b>the thread pool is never touched</b>. That\'s how a handful of threads serve tens of thousands of connections.',
+  key:{h:'The most misunderstood thing in Node', p:'"Node is async because of the thread pool" is <b>wrong for network work</b>. Sockets are watched by <code>epoll</code>/<code>kqueue</code>/<code>IOCP</code> from the one loop thread. No threads. The pool is only for files and CPU work.'},
+  eng:{
+    v8:{s:'helps',p:['Runs the <code>net</code>/<code>http</code> JS and later <b>your callback</b>.']},
+    node:{s:'helps',p:['<code>lib/net.js</code>/<code>lib/http.js</code> build the request; the binding creates a <code>TCPWrap</code> and calls <code>uv_tcp_connect()</code>.']},
+    uv:{s:'helps',p:['<b>Registers the socket fd with the kernel poller</b> and watches it in the <b>poll</b> phase — with <b>zero</b> pool threads.']},
+    kernel:{s:'owns',p:['Owns the <b>async notification mechanism</b> (<code>epoll</code>/<code>kqueue</code>/<code>IOCP</code>).','Moves the bytes and marks the fd ready; libuv is just watching.']}
+  }};
+
+C.pool = { name:'Thread-pool work — crypto, zlib, dns', group:'I/O paths', owner:'uv',
+  flow:['node','uv','kernel','v8'],
+  note:'The pool isn\'t only for files. <b>libuv</b> owns a 4-thread pool used for anything with <b>no async syscall</b> — including <i>pure CPU</i> work like password hashing.',
+  key:{h:'dns.lookup is the trap', p:'<code>dns.lookup()</code> (which runs implicitly when you pass a <i>hostname</i> to <code>http.get</code>) uses <code>getaddrinfo</code>, which blocks — so it rides the <b>thread pool</b>. Network code that looks kernel-path can secretly bottleneck on 4 threads.'},
+  eng:{
+    v8:{s:'helps',p:['Runs the API call and the final callback.']},
+    node:{s:'helps',p:['<code>crypto</code>/<code>zlib</code>/<code>dns</code> JS + binding build the job (e.g. <code>PBKDF2Job</code>).']},
+    uv:{s:'owns',p:['Schedules the job across the <b>thread pool</b> (<code>UV_THREADPOOL_SIZE</code>, default 4, max 1024).','Queues the callback when a worker finishes.']},
+    kernel:{s:'relays',p:['Provides the OS threads the pool runs on; the pool logic is libuv\'s.']}
+  }};
+
+C.modules = { name:'Module loading — require / import', group:'Runtime services', owner:'node',
+  flow:['node','uv','kernel','v8'],
+  note:'The module <b>system</b> is <b>Node\'s</b> — resolution, caching, the wrapper. But loading a file means a real disk read (libuv + kernel), and compiling it is V8.',
+  key:{h:'require is more than it looks', p:'A single <code>require</code> resolves a path (Node\'s algorithm), reads a file (libuv → kernel, synchronously for CommonJS), wraps it (Node), compiles it (V8), then runs it (V8). Four engines for one line.'},
+  eng:{
+    v8:{s:'helps',p:['<b>Compiles</b> the module source; for ESM, links the module graph via its module machinery.']},
+    node:{s:'owns',p:['Owns the <b>CommonJS/ESM systems</b>: the resolution algorithm, the <code>require</code> cache, the module wrapper, loader hooks.']},
+    uv:{s:'relays',p:['Performs the file read that loads the source (via the pool for async, directly for sync <code>require</code>).']},
+    kernel:{s:'relays',p:['Reads the file off disk.']}
+  }};
+
+C.console = { name:'console.log', group:'Runtime services', owner:'node',
+  flow:['v8','node','kernel'],
+  note:'Deceptively deep. <b>V8</b> formats the values, <b>Node</b> owns the <code>console</code> object and writes to a stream, and the <b>kernel</b> puts characters on your terminal.',
+  key:{h:'Sometimes sync, sometimes not', p:'Writes to a <b>TTY</b> are synchronous; writes to a <b>file or pipe</b> may go through libuv asynchronously. So <code>console.log</code> can subtly change timing depending on where stdout points — a real gotcha when redirecting logs.'},
+  eng:{
+    v8:{s:'helps',p:['Runs <code>util.inspect</code> to <b>format</b> objects into a string.']},
+    node:{s:'owns',p:['Owns <code>lib/console.js</code> — writes the formatted line to the <b>stdout stream</b>.']},
+    uv:{s:'relays',p:['If stdout is a pipe/file, carries the async write; for a TTY the write is direct/sync.']},
+    kernel:{s:'helps',p:['Performs the actual <code>write()</code> to the terminal or file descriptor.']}
+  }};
+
+const ORDER = ['stack','heap','gc','micro','promise','nexttick','timers','immediate','loop','taskq','file','net','pool','modules','console'];
+let curKey = 'stack';
+
+function buildRail(){
+  let html='', lastGroup='';
+  ORDER.forEach(k=>{
+    const c=C[k];
+    if(c.group!==lastGroup){ html+=`<div class="rail-group">${c.group}</div>`; lastGroup=c.group; }
+    html+=`<button class="cbtn" data-k="${k}" aria-pressed="${k===curKey}" style="--own:${OWNER_COLOR[c.owner]}">
+      <i class="odot"></i>${esc(c.name)}</button>`;
+  });
+  $('rail').innerHTML=html;
+  document.querySelectorAll('.cbtn').forEach(b=>b.onclick=()=>{ curKey=b.dataset.k; render(); });
+}
+
+const STATE_LABEL = { owns:'owns it', helps:'helps', relays:'relays', none:'not involved' };
+
+function render(){
+  const c=C[curKey];
+  document.querySelectorAll('.cbtn').forEach(b=>b.setAttribute('aria-pressed', b.dataset.k===curKey));
+
+  $('owns-pill').textContent = c.owner==='shared' ? 'shared ownership' : (OWNER_LABEL[c.owner]+' owns this');
+  $('owns-pill').style.background = 'color-mix(in srgb, '+OWNER_COLOR[c.owner]+' 42%, transparent)';
+  $('note').innerHTML = c.note;
+
+  // flow ribbon
+  const names={v8:'V8',node:'Node',uv:'libuv',kernel:'kernel'};
+  $('flow').innerHTML = '<span style="margin-right:2px">involves:</span>' + c.flow.map((f,i)=>
+    `${i?'<span class="farr">→</span>':''}<span class="fstep on" style="--x:${OWNER_COLOR[f]}">${names[f]}</span>`
+  ).join('') + (c.flow.length>1 ? '<span class="farr" style="margin-left:4px">→ back to your callback</span>':'');
+
+  // cards
+  $('cards').innerHTML = ENGINES.map(E=>{
+    const d=c.eng[E.key], st=d.s;
+    const cls = st==='owns' ? 'owns' : (st==='none' ? 'none' : '');
+    let inner;
+    if(st==='none'){
+      inner = `<p class="ninvolved" style="margin:0">${d.note ? d.note : 'Not involved in this operation.'}</p>`;
+    } else {
+      inner = `<ul>${d.p.map(x=>`<li>${x}</li>`).join('')}</ul>` +
+              (d.note ? `<p class="ninvolved" style="margin:8px 0 0">${d.note}</p>` : '');
+    }
+    return `<section class="ecard ${cls}" style="--ec:${E.color}">
+      <h2><i class="swatch"></i><span class="ename">${E.name}</span>
+        <span class="elayer">${E.layer}</span>
+        <span class="state ${st}">${STATE_LABEL[st]}</span></h2>
+      <div class="ebody">${inner}</div>
+    </section>`;
+  }).join('');
+
+  $('keynote').innerHTML = `<b>${c.key.h}</b><p>${c.key.p}</p>`;
+}
+
+buildRail();
+render();
+
+document.addEventListener('keydown',e=>{
+  const i=ORDER.indexOf(curKey);
+  if(e.key==='ArrowDown'||e.key==='ArrowRight'){ e.preventDefault(); curKey=ORDER[(i+1)%ORDER.length]; render(); buildRail(); }
+  if(e.key==='ArrowUp'||e.key==='ArrowLeft'){ e.preventDefault(); curKey=ORDER[(i-1+ORDER.length)%ORDER.length]; render(); buildRail(); }
+});
+</script>
+<footer class="site-footer">Built with AI from a prompt by <a href="https://github.com/gsmithun4" target="_blank" rel="noopener noreferrer">gsmithun4</a>.</footer>
+</body>
+</html>

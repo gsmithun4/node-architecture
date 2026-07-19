@@ -1,0 +1,931 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Inside Node.js — V8, libuv & the Architecture</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --paper:#E6E8E3; --panel:#FAFAF8; --panel-2:#F1F2EE;
+    --ink:#191D1E; --ink-2:#5C6461; --ink-3:#8E9591; --rule:#CBD0C8;
+    --v8:#191D1E;        /* V8 / synchronous JS */
+    --micro:#6D4AC7;     /* microtasks — owned by V8 */
+    --uv:#0E6E63;        /* libuv / the loop */
+    --pool:#B4740A;      /* thread pool */
+    --kernel:#B03A3A;    /* kernel async I/O */
+    --dormant:#9AA29D;
+    --hl:#FFF3C4;
+    --shadow:0 1px 0 rgba(25,29,30,.06), 0 2px 8px rgba(25,29,30,.05);
+    --mono:'IBM Plex Mono',ui-monospace,monospace;
+    --disp:'Space Grotesk',system-ui,sans-serif;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0}
+  body{
+    background:var(--paper);
+    background-image:linear-gradient(var(--rule) 1px,transparent 1px),linear-gradient(90deg,var(--rule) 1px,transparent 1px);
+    background-size:28px 28px; background-position:-1px -1px;
+    color:var(--ink); font-family:var(--disp); -webkit-font-smoothing:antialiased; padding:18px;
+  }
+  .wrap{max-width:1340px;margin:0 auto}
+
+  header{display:flex;flex-wrap:wrap;gap:16px;align-items:flex-end;justify-content:space-between;
+    padding-bottom:14px;border-bottom:1.5px solid var(--ink)}
+  h1{font-size:clamp(19px,2.4vw,27px);font-weight:700;letter-spacing:-.02em;margin:0;line-height:1.05}
+  h1 em{font-style:normal;color:var(--ink-3)}
+  .sub{font-family:var(--mono);font-size:11px;color:var(--ink-2);margin-top:5px}
+
+  select,button,input{font-family:var(--mono);font-size:12px;color:var(--ink);background:var(--panel);
+    border:1.5px solid var(--ink);border-radius:2px;padding:7px 11px;cursor:pointer;
+    transition:transform .08s ease, background .12s ease}
+  button:hover:not(:disabled){background:var(--ink);color:var(--panel)}
+  button:active:not(:disabled){transform:translateY(1px)}
+  button:disabled{opacity:.35;cursor:not-allowed}
+  button.primary{background:var(--ink);color:var(--panel)}
+  :focus-visible{outline:2.5px solid var(--micro);outline-offset:2px}
+  .controls{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:14px}
+
+  .tabs{display:flex;margin:14px 0;border-bottom:1.5px solid var(--ink)}
+  .tab{font-family:var(--mono);font-size:11.5px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;
+    background:transparent;border:1.5px solid transparent;border-bottom:0;border-radius:2px 2px 0 0;
+    padding:9px 16px;margin-bottom:-1.5px;color:var(--ink-2)}
+  .tab:hover{background:transparent;color:var(--ink)}
+  .tab[aria-selected="true"]{background:var(--panel);border-color:var(--ink);color:var(--ink)}
+  .tab small{display:block;font-size:9px;font-weight:400;letter-spacing:.02em;text-transform:none;color:var(--ink-3);margin-top:1px}
+  .tab[aria-selected="true"] small{color:var(--ink-2)}
+
+  .narrate{display:flex;gap:12px;align-items:center;background:var(--ink);color:#F2F3F0;border-radius:2px;
+    padding:11px 14px;margin-bottom:14px;min-height:48px}
+  .stepno{font-family:var(--mono);font-size:11px;font-weight:600;background:rgba(255,255,255,.12);
+    padding:4px 7px;border-radius:2px;white-space:nowrap}
+  .narrate p{margin:0;font-size:13.5px;line-height:1.45}
+  .narrate b{font-weight:600;border-bottom:1.5px solid rgba(255,255,255,.45)}
+
+  .card{background:var(--panel);border:1.5px solid var(--ink);border-radius:2px;box-shadow:var(--shadow);overflow:hidden}
+  .card>h2{font-family:var(--mono);font-size:10.5px;font-weight:600;letter-spacing:.1em;text-transform:uppercase;
+    margin:0;padding:8px 11px;border-bottom:1.5px solid var(--ink);display:flex;justify-content:space-between;gap:8px;align-items:center}
+  .card>h2 span{color:var(--ink-3);font-weight:400;letter-spacing:.04em;text-transform:none;font-size:10px}
+  .body{padding:10px 11px}
+
+  /* ---------------- layers tab ---------------- */
+  .layout2{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:14px;align-items:start}
+  .stackview{display:flex;flex-direction:column;gap:0}
+  .layer{border:1.5px solid var(--ink);border-radius:2px;background:var(--panel);padding:11px 13px;
+    cursor:pointer;text-align:left;width:100%;font-family:var(--disp);transition:background .12s ease}
+  .layer+.layer{margin-top:-1.5px}
+  .layer:hover{background:var(--panel-2);color:var(--ink)}
+  .layer[aria-pressed="true"]{background:var(--hl);box-shadow:inset 5px 0 0 var(--ink);z-index:1;position:relative}
+  .layer h3{margin:0;font-size:14px;font-weight:600;display:flex;align-items:center;gap:8px}
+  .layer p{margin:3px 0 0;font-family:var(--mono);font-size:10.5px;color:var(--ink-2);line-height:1.5}
+  .layer .tag{font-family:var(--mono);font-size:9px;font-weight:600;letter-spacing:.07em;text-transform:uppercase;
+    border:1.5px solid;border-radius:2px;padding:1px 5px;margin-left:auto}
+  .tag.js{color:var(--v8);border-color:var(--v8)}
+  .tag.cpp{color:var(--kernel);border-color:var(--kernel)}
+  .tag.c{color:var(--uv);border-color:var(--uv)}
+  .tag.os{color:var(--ink-3);border-color:var(--ink-3)}
+  .arrowrow{text-align:center;font-family:var(--mono);font-size:14px;color:var(--ink-3);line-height:1;padding:3px 0}
+
+  .detail h3{margin:0 0 4px;font-size:16px;font-weight:600}
+  .detail .kicker{font-family:var(--mono);font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-3);margin-bottom:9px}
+  .detail h4{font-family:var(--mono);font-size:10px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;
+    margin:14px 0 6px;color:var(--ink-2)}
+  .detail ul{margin:0;padding-left:16px}
+  .detail li{font-size:13px;line-height:1.55;margin-bottom:5px}
+  .detail li b{font-weight:600}
+  .detail code{font-family:var(--mono);font-size:11.5px;background:var(--panel-2);border:1px solid var(--rule);
+    border-radius:2px;padding:0 3px}
+  .myth{border:1.5px solid var(--kernel);border-radius:2px;padding:9px 11px;margin-top:14px;background:rgba(176,58,58,.04)}
+  .myth b{font-family:var(--mono);font-size:9.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--kernel);display:block;margin-bottom:4px}
+  .myth p{margin:0;font-size:12.5px;line-height:1.55}
+
+  /* ---------------- phases tab ---------------- */
+  .pdots{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-bottom:14px}
+  .pdot{font-family:var(--mono);font-size:11px;padding:6px 12px;border-radius:999px;border:1.5px solid var(--rule);
+    background:var(--panel);color:var(--ink-2)}
+  .pdot:hover{background:var(--panel-2);color:var(--ink)}
+  .pdot[aria-current="true"]{border-color:var(--uv);background:var(--uv);color:#fff;font-weight:600}
+  .pdot.skip{border:0;background:none;color:var(--ink-3);padding:6px 2px;cursor:default;font-size:14px}
+  .pq{border:1.5px solid var(--uv);border-radius:2px;padding:8px 10px;margin-top:14px;background:rgba(14,110,99,.05)}
+  .pq b{display:block;font-family:var(--mono);font-size:9.5px;letter-spacing:.08em;text-transform:uppercase;
+    color:var(--uv);margin-bottom:3px}
+  .pq span{font-family:var(--mono);font-size:12px;color:var(--ink)}
+  .pnav{display:flex;gap:8px;align-items:center;margin-top:14px}
+  .pturn{font-family:var(--mono);font-size:10px;color:var(--ink-3);margin-left:auto}
+
+  /* ---------------- trace tab ---------------- */
+  .layout3{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,.95fr) minmax(0,1.05fr);gap:14px;align-items:start}
+  .col{display:flex;flex-direction:column;gap:14px;min-width:0}
+  pre.code{margin:0;font-family:var(--mono);font-size:12px;line-height:1.65;overflow-x:auto}
+  .ln{display:flex;gap:9px;padding:0 5px;border-radius:2px;white-space:pre}
+  .ln .n{color:var(--ink-3);user-select:none;min-width:15px;text-align:right;font-size:10.5px}
+  .ln.on{background:var(--hl);box-shadow:inset 3px 0 0 var(--ink)}
+  .tok-k{color:#8A2E6B}.tok-s{color:#0E6E63}.tok-f{color:#2B4C9B}.tok-c{color:var(--ink-3);font-style:italic}.tok-n{color:#B4740A}
+
+  .zone{border:1.5px solid var(--rule);border-radius:2px;padding:8px 9px;margin-bottom:9px;transition:all .15s ease}
+  .zone:last-child{margin-bottom:0}
+  .zone.hot{border-color:var(--ink);background:var(--hl)}
+  .zone-h{font-family:var(--mono);font-size:9.5px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;
+    color:var(--ink-2);margin-bottom:6px;display:flex;justify-content:space-between;gap:6px}
+  .zone-h em{font-style:normal;color:var(--ink-3);font-weight:400;letter-spacing:.02em;text-transform:none}
+
+  .lane{display:flex;gap:5px;flex-wrap:wrap;min-height:28px;align-items:center;background:var(--panel-2);
+    border:1.5px dashed var(--rule);border-radius:2px;padding:5px}
+  .lane.hot{border-style:solid;border-color:var(--ink);background:#fff}
+  .chip{font-family:var(--mono);font-size:10.5px;font-weight:500;padding:4px 7px;border-radius:2px;border:1.5px solid;
+    background:var(--panel);white-space:nowrap;animation:pop .18s ease-out}
+  @keyframes pop{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:none}}
+  .chip.v8{border-color:var(--v8);color:var(--v8)}
+  .chip.micro{border-color:var(--micro);color:var(--micro)}
+  .chip.uv{border-color:var(--uv);color:var(--uv)}
+  .chip.pool{border-color:var(--pool);color:var(--pool)}
+  .chip.kernel{border-color:var(--kernel);color:var(--kernel)}
+  .chip.dormant{border-color:var(--dormant);color:var(--dormant);border-style:dashed}
+  .chip em{font-style:normal;opacity:.6}
+
+  .stack{display:flex;flex-direction:column-reverse;gap:4px;min-height:74px;justify-content:flex-end}
+  .frame{font-family:var(--mono);font-size:11px;font-weight:500;border:1.5px solid var(--ink);border-radius:2px;
+    background:var(--panel-2);padding:6px 8px;display:flex;justify-content:space-between;gap:8px;animation:pop .18s ease-out}
+  .frame.top{background:#fff}
+  .frame small{color:var(--ink-3);font-weight:400}
+
+  .threads{display:grid;grid-template-columns:repeat(4,1fr);gap:5px}
+  .thread{border:1.5px dashed var(--rule);border-radius:2px;background:var(--panel-2);padding:6px 4px;text-align:center;
+    font-family:var(--mono);font-size:9.5px;color:var(--ink-3);min-height:44px;display:flex;flex-direction:column;
+    justify-content:center;gap:2px}
+  .thread.busy{border-style:solid;border-color:var(--pool);background:#fff;color:var(--pool);font-weight:600}
+  .thread b{font-size:9px;letter-spacing:.05em;text-transform:uppercase;color:var(--ink-3);font-weight:600}
+  .thread.busy b{color:var(--pool)}
+
+  .phases{display:flex;flex-direction:column;gap:2px}
+  .ph{font-family:var(--mono);font-size:10.5px;padding:4px 7px;border-radius:2px;border:1.5px solid transparent;
+    display:flex;justify-content:space-between;gap:8px;color:var(--ink-2)}
+  .ph.on{border-color:var(--uv);background:#fff;color:var(--uv);font-weight:600}
+  .ph small{color:var(--ink-3);font-weight:400}
+  .ph.on small{color:var(--uv);opacity:.7}
+
+  .out{background:var(--ink);border-radius:2px;padding:9px 10px;min-height:62px;font-family:var(--mono);
+    font-size:11.5px;line-height:1.75;color:#EDEEEA}
+  .out div{animation:pop .18s ease-out}
+  .out div::before{content:'› ';color:var(--dormant)}
+  .out .ph2{color:var(--ink-3)}
+  .out .ph2::before{content:''}
+
+  /* ---------------- lab tab ---------------- */
+  .labgrid{display:grid;grid-template-columns:minmax(0,320px) minmax(0,1fr);gap:14px;align-items:start}
+  .field{margin-bottom:13px}
+  .field label{display:block;font-family:var(--mono);font-size:10px;font-weight:600;letter-spacing:.07em;
+    text-transform:uppercase;color:var(--ink-2);margin-bottom:5px}
+  .field select{width:100%}
+  input[type=range]{width:100%;padding:0;border:0;background:transparent;cursor:pointer}
+  .val{font-family:var(--mono);font-size:11px;color:var(--ink);float:right;font-weight:600}
+  .verdict{border:1.5px solid var(--ink);border-radius:2px;padding:10px 11px;margin-top:14px;background:var(--hl)}
+  .verdict b{font-family:var(--mono);font-size:9.5px;letter-spacing:.08em;text-transform:uppercase;display:block;margin-bottom:5px}
+  .verdict p{margin:0;font-size:12.5px;line-height:1.55}
+
+  .gantt{position:relative}
+  .grow{display:flex;align-items:center;gap:8px;margin-bottom:5px}
+  .glabel{font-family:var(--mono);font-size:10px;color:var(--ink-2);width:112px;flex:0 0 112px;text-align:right;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .gtrack{position:relative;flex:1;height:22px;background:var(--panel-2);border:1.5px dashed var(--rule);border-radius:2px}
+  .gbar{position:absolute;top:2px;bottom:2px;border-radius:2px;border:1.5px solid;font-family:var(--mono);
+    font-size:9.5px;display:flex;align-items:center;padding:0 5px;overflow:hidden;white-space:nowrap;
+    animation:grow .3s ease-out}
+  @keyframes grow{from{transform:scaleX(.02);opacity:0}to{transform:none;opacity:1}}
+  .gbar{transform-origin:left center}
+  .gbar.pool{background:rgba(180,116,10,.14);border-color:var(--pool);color:var(--pool)}
+  .gbar.kernel{background:rgba(176,58,58,.12);border-color:var(--kernel);color:var(--kernel)}
+  .gwait{position:absolute;top:2px;bottom:2px;border-radius:2px;border:1.5px dashed var(--dormant);
+    background:repeating-linear-gradient(45deg,transparent,transparent 4px,rgba(154,162,157,.18) 4px,rgba(154,162,157,.18) 8px);
+    font-family:var(--mono);font-size:9px;color:var(--ink-3);display:flex;align-items:center;padding:0 4px;overflow:hidden}
+  .axis{display:flex;justify-content:space-between;font-family:var(--mono);font-size:9.5px;color:var(--ink-3);
+    margin-left:120px;margin-top:4px;border-top:1px solid var(--rule);padding-top:3px}
+
+  .legend{display:flex;gap:14px;flex-wrap:wrap;margin-top:14px;padding-top:10px;border-top:1.5px solid var(--ink);
+    font-family:var(--mono);font-size:10.5px;color:var(--ink-2)}
+  .legend span{display:flex;align-items:center;gap:5px}
+  .dot{width:9px;height:9px;border-radius:50%;flex:0 0 auto}
+
+  .site-footer{
+    margin-top:16px;
+    padding-top:10px;
+    border-top:1.5px solid var(--ink);
+    font-family:var(--mono);
+    font-size:10.5px;
+    color:var(--ink-2);
+  }
+  .site-footer a{color:var(--ink);text-decoration-thickness:1.5px}
+
+  [hidden]{display:none!important}
+  @media (max-width:1080px){
+    .layout3{grid-template-columns:1fr 1fr} .layout3 .col:nth-child(3){grid-column:1/-1}
+    .layout2,.labgrid{grid-template-columns:1fr}
+  }
+  @media (max-width:720px){
+    body{padding:11px} .layout3{grid-template-columns:1fr} .layout3 .col:nth-child(3){grid-column:auto}
+    .threads{grid-template-columns:repeat(2,1fr)} .glabel{width:70px;flex:0 0 70px} .axis{margin-left:78px}
+  }
+  @media (prefers-reduced-motion:reduce){ *{animation:none!important;transition:none!important} }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <div>
+      <h1>Inside Node.js <em>— V8, libuv &amp; the architecture</em></h1>
+      <div class="sub">what runs your JS · what does the I/O · and which one is actually blocking</div>
+    </div>
+  </header>
+
+  <div class="tabs" role="tablist">
+    <button class="tab" id="tab-layers" role="tab" aria-selected="true">Layers<small>click through the stack</small></button>
+    <button class="tab" id="tab-phases" role="tab" aria-selected="false">Loop phases<small>one turn of the libuv loop</small></button>
+    <button class="tab" id="tab-trace"  role="tab" aria-selected="false">Trace an operation<small>follow it through V8 &amp; libuv</small></button>
+    <button class="tab" id="tab-lab"    role="tab" aria-selected="false">Thread-pool lab<small>watch the pool saturate</small></button>
+  </div>
+
+  <!-- ================= LAYERS ================= -->
+  <div id="view-layers">
+    <div class="layout2">
+      <div>
+        <div class="stackview" id="stackview"></div>
+      </div>
+      <section class="card">
+        <h2>Detail <span id="detail-tag"></span></h2>
+        <div class="body detail" id="detail"></div>
+      </section>
+    </div>
+  </div>
+
+  <!-- ================= PHASES ================= -->
+  <div id="view-phases" hidden>
+    <div class="pdots" id="pdots"></div>
+
+    <div class="layout2">
+      <section class="card">
+        <h2>Phase <span id="p-count"></span></h2>
+        <div class="body detail">
+          <h3 id="p-title" style="font-family:var(--mono);font-size:16px"></h3>
+          <div id="p-body"></div>
+          <div class="pq"><b>this phase's queue</b><span id="p-queue"></span></div>
+          <div class="pnav">
+            <button id="p-prev">← Prev</button>
+            <button id="p-next" class="primary">Next phase →</button>
+            <span class="pturn" id="p-turn"></span>
+          </div>
+        </div>
+      </section>
+
+      <div>
+        <section class="card" style="margin-bottom:14px">
+          <h2>Between every phase <span>not libuv's</span></h2>
+          <div class="body detail">
+            <ul>
+              <li><b>process.nextTick queue</b> — drained first. Owned by <b>Node</b>, not libuv and not V8.</li>
+              <li><b>Microtask queue</b> — drained next. The queue itself lives in <b>V8</b>; Node just decides when to tell V8 to empty it.</li>
+            </ul>
+            <p style="font-size:13px;line-height:1.6;color:var(--ink-2);margin:10px 0 0">
+              Neither is a phase. They <b>cut in front of the whole cycle</b>, which is why a promise always beats a timer,
+              and why an infinite <code>nextTick</code> chain can starve the loop libuv is trying to run.</p>
+          </div>
+        </section>
+
+        <section class="card">
+          <h2>Why it matters</h2>
+          <div class="body detail">
+            <ul>
+              <li>There is <b>no single "task queue"</b> in Node. <code>setTimeout</code> and <code>setImmediate</code> live in <i>different phases</i> — you cannot reason about them as one FIFO.</li>
+              <li>At the <b>top level</b>, <code>setTimeout(fn,0)</code> vs <code>setImmediate</code> is <b>nondeterministic</b> — it depends on how long startup took before the loop reached <i>timers</i>.</li>
+              <li>Inside an <b>I/O callback</b> you are in <i>poll</i>, so <i>check</i> is next: <code>setImmediate</code> <b>always</b> wins. Guaranteed.</li>
+              <li>The loop advances <b>between</b> your callbacks, never during them. A busy stack freezes it mid-cycle.</li>
+            </ul>
+          </div>
+        </section>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================= TRACE ================= -->
+  <div id="view-trace" hidden>
+    <div class="controls">
+      <select id="op" aria-label="Operation"></select>
+      <button id="t-back">←</button>
+      <button id="t-step" class="primary">Step →</button>
+      <button id="t-play">Run</button>
+      <button id="t-reset">Reset</button>
+    </div>
+
+    <div class="narrate">
+      <span class="stepno" id="t-stepno">0 / 0</span>
+      <p id="t-note"></p>
+    </div>
+
+    <div class="layout3">
+      <div class="col">
+        <section class="card">
+          <h2>Your code</h2>
+          <div class="body"><pre class="code" id="t-code"></pre></div>
+        </section>
+        <section class="card">
+          <h2>Console</h2>
+          <div class="body"><div class="out" id="t-out"></div></div>
+        </section>
+      </div>
+
+      <div class="col">
+        <section class="card">
+          <h2>V8 <span>the JS engine</span></h2>
+          <div class="body">
+            <div class="zone" id="z-stack">
+              <div class="zone-h"><span>Call stack</span><em>one thread</em></div>
+              <div class="stack" id="t-stack"></div>
+            </div>
+            <div class="zone" id="z-micro">
+              <div class="zone-h"><span>Microtask queue</span><em>V8 owns this, not libuv</em></div>
+              <div class="lane" id="t-micro"></div>
+            </div>
+            <div class="zone" id="z-heap">
+              <div class="zone-h"><span>Heap</span><em>objects, closures, buffers</em></div>
+              <div class="lane" id="t-heap"></div>
+            </div>
+          </div>
+        </section>
+        <section class="card">
+          <h2>C++ bindings <span>the bridge</span></h2>
+          <div class="body" style="padding:8px 9px">
+            <div class="lane" id="t-binding"></div>
+          </div>
+        </section>
+      </div>
+
+      <div class="col">
+        <section class="card">
+          <h2>libuv <span>the event loop &amp; I/O</span></h2>
+          <div class="body">
+            <div class="zone" id="z-phases">
+              <div class="zone-h"><span>Loop phases</span><em id="t-spin">stopped</em></div>
+              <div class="phases" id="t-phases"></div>
+            </div>
+            <div class="zone" id="z-pool">
+              <div class="zone-h"><span>Thread pool</span><em>fs · dns.lookup · crypto · zlib</em></div>
+              <div class="threads" id="t-pool"></div>
+            </div>
+            <div class="zone" id="z-kernel">
+              <div class="zone-h"><span>Kernel async I/O</span><em>epoll · kqueue · IOCP</em></div>
+              <div class="lane" id="t-kernel"></div>
+            </div>
+            <div class="zone" id="z-cbq">
+              <div class="zone-h"><span>Completed → callback queue</span><em>waiting for the stack</em></div>
+              <div class="lane" id="t-cbq"></div>
+            </div>
+          </div>
+        </section>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================= LAB ================= -->
+  <div id="view-lab" hidden>
+    <div class="labgrid">
+      <section class="card">
+        <h2>Setup</h2>
+        <div class="body">
+          <div class="field">
+            <label for="lab-op">Operation</label>
+            <select id="lab-op"></select>
+          </div>
+          <div class="field">
+            <label for="lab-n">Concurrent calls <span class="val" id="lab-n-v">8</span></label>
+            <input type="range" id="lab-n" min="1" max="16" value="8">
+          </div>
+          <div class="field">
+            <label for="lab-p">UV_THREADPOOL_SIZE <span class="val" id="lab-p-v">4</span></label>
+            <input type="range" id="lab-p" min="1" max="12" value="4">
+          </div>
+          <button id="lab-run" class="primary" style="width:100%">Run all at once ▶</button>
+          <div class="verdict" id="lab-verdict"></div>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Timeline <span id="lab-total"></span></h2>
+        <div class="body">
+          <div class="gantt" id="lab-gantt"></div>
+          <div class="axis" id="lab-axis"></div>
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <div class="legend">
+    <span><i class="dot" style="background:var(--v8)"></i>V8 · your JS</span>
+    <span><i class="dot" style="background:var(--micro)"></i>microtasks (V8)</span>
+    <span><i class="dot" style="background:var(--uv)"></i>libuv · the loop</span>
+    <span><i class="dot" style="background:var(--pool)"></i>thread pool</span>
+    <span><i class="dot" style="background:var(--kernel)"></i>kernel async I/O</span>
+    <span><i class="dot" style="background:var(--dormant)"></i>waiting</span>
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+
+/* ============================================================
+   TAB 1 — LAYERS
+   ============================================================ */
+const LAYERS = [
+  { id:'app', title:'Your JavaScript', tag:'js', tagTxt:'JS',
+    blurb:'app.js — the code you actually write',
+    kicker:'the top of the stack',
+    what:[
+      'Ordinary JavaScript: your modules, your <code>async</code> functions, your callbacks.',
+      'It has <b>no idea</b> whether an operation will be handled by a thread, by the kernel, or not offloaded at all. That is the whole point of the abstraction — and also why the performance surprises happen.'
+    ],
+    myth:null },
+
+  { id:'core', title:'Node core library', tag:'js', tagTxt:'JS',
+    blurb:'lib/fs.js · lib/http.js · lib/net.js — shipped with Node, still JavaScript',
+    kicker:'layer 2 — still JS',
+    what:[
+      'When you call <code>fs.readFile()</code>, the first thing that runs is <b>more JavaScript</b> — Node\'s own standard library.',
+      'It validates arguments, normalises paths, wraps your callback, and then calls down into C++ through the <b>binding</b> layer.',
+      '<code>require(\'fs\')</code> is loading a JS file. The magic is one layer lower.'
+    ],
+    myth:{h:'Common confusion', p:'People imagine <code>fs</code> is "native code." Most of it is JavaScript. Only the last hop is C++.'} },
+
+  { id:'bind', title:'C++ bindings', tag:'cpp', tagTxt:'C++',
+    blurb:'node_file.cc · node_crypto.cc — the bridge between JS and C',
+    kicker:'layer 3 — the bridge',
+    what:[
+      'This is where the two worlds meet. The binding layer uses <b>V8\'s embedding API</b> to read JS values, convert them into C types, and call libuv.',
+      'It creates a request object (e.g. <code>FSReqCallback</code>) that <b>holds a reference to your JS callback</b>, so it can be invoked later when the work finishes.',
+      'That reference is why your callback (and everything it closes over) stays alive in the heap while the I/O is in flight.'
+    ],
+    myth:null },
+
+  { id:'v8', title:'V8', tag:'cpp', tagTxt:'C++',
+    blurb:'parses, compiles and runs the JavaScript · owns the heap, the call stack and the microtask queue',
+    kicker:'the engine',
+    what:[
+      '<b>Parser → AST.</b> Your source is parsed (lazily where it can be) into an abstract syntax tree.',
+      '<b>Ignition</b> — the bytecode interpreter. Every function starts here. Fast to start, slower to run.',
+      '<b>TurboFan</b> — the optimising JIT. Functions that run hot get compiled to machine code, using assumptions about the types it has been seeing. Break those assumptions (change a variable\'s shape) and it <b>deoptimises</b> back to bytecode.',
+      '<b>The heap.</b> New space (short-lived objects, collected by the fast <i>scavenger</i>) and old space (survivors, collected by <i>mark-sweep-compact</i>). GC pauses happen <b>on your thread</b>.',
+      '<b>The call stack.</b> One per thread, and Node runs your JS on exactly one.',
+      '<b>The microtask queue.</b> This lives in <b>V8</b>, not libuv. Promises are a language feature — they need no I/O and no event loop.'
+    ],
+    myth:{h:'Myth', p:'"Promises are handled by the event loop." They are not — the microtask queue belongs to V8. Node just tells V8 to drain it between phases. A promise that never touches I/O never touches libuv at all.'} },
+
+  { id:'uv', title:'libuv', tag:'c', tagTxt:'C',
+    blurb:'the event loop · timers · the thread pool · cross-platform async I/O',
+    kicker:'the concurrency engine',
+    what:[
+      '<b>The event loop</b> itself — the <code>while</code> loop that turns, phase by phase: <i>timers → pending → idle/prepare → poll → check → close</i>.',
+      '<b>The timers heap.</b> <code>setTimeout</code> is not offloaded anywhere; libuv just keeps a min-heap of due times and checks it in the timers phase.',
+      '<b>The thread pool</b> — 4 threads by default (<code>UV_THREADPOOL_SIZE</code>, max 1024). Used for work with <b>no async kernel API</b>: file system, <code>dns.lookup</code>, <code>crypto.pbkdf2</code>/<code>scrypt</code>, <code>zlib</code>.',
+      '<b>Kernel async I/O</b> — for <b>network</b> sockets, libuv uses the OS\'s own notification system (<code>epoll</code> on Linux, <code>kqueue</code> on macOS/BSD, <code>IOCP</code> on Windows). No threads involved.',
+      'libuv is a standalone C library. Node is its most famous user, but it is not part of Node.'
+    ],
+    myth:{h:'The big one', p:'"Node is async because of the thread pool." <b>No.</b> Network I/O — the thing a Node server does all day — never touches the pool. It is handled by the kernel. That is why 4 threads can serve 10,000 sockets. The pool is for file and CPU work that has no async syscall.'} },
+
+  { id:'os', title:'Operating system / kernel', tag:'os', tagTxt:'OS',
+    blurb:'epoll · kqueue · IOCP · the actual syscalls',
+    kicker:'the floor',
+    what:[
+      'The kernel is what actually reads the disk and moves packets on the wire.',
+      'For sockets it can <b>notify</b> when a file descriptor is ready — so libuv can watch thousands of them from one thread.',
+      'For regular files it mostly <b>cannot</b> (portably) — <code>read(2)</code> on a file blocks. Hence the thread pool. This asymmetry is the reason Node has two different async paths at all.'
+    ],
+    myth:null }
+];
+
+let openLayer = 'v8';
+function renderLayers(){
+  $('stackview').innerHTML = LAYERS.map((L,i)=>`
+    ${i? '<div class="arrowrow">↓</div>':''}
+    <button class="layer" data-id="${L.id}" aria-pressed="${L.id===openLayer}">
+      <h3>${esc(L.title)} <span class="tag ${L.tag}">${L.tagTxt}</span></h3>
+      <p>${L.blurb}</p>
+    </button>`).join('');
+  document.querySelectorAll('.layer').forEach(b=>b.onclick=()=>{ openLayer=b.dataset.id; renderLayers(); });
+
+  const L = LAYERS.find(x=>x.id===openLayer);
+  $('detail-tag').textContent = L.tagTxt;
+  $('detail').innerHTML = `
+    <div class="kicker">${L.kicker}</div>
+    <h3>${esc(L.title)}</h3>
+    <h4>What it does</h4>
+    <ul>${L.what.map(w=>`<li>${w}</li>`).join('')}</ul>
+    ${L.myth? `<div class="myth"><b>${L.myth.h}</b><p>${L.myth.p}</p></div>`:''}`;
+}
+
+/* ============================================================
+   TAB 2 — TRACE
+   ============================================================ */
+const PHASES = [
+  ['timers','setTimeout / setInterval callbacks'],
+  ['pending','deferred system callbacks'],
+  ['poll','retrieve I/O events — the loop parks here'],
+  ['check','setImmediate callbacks'],
+  ['close','socket.on(\'close\')']
+];
+
+function T(){
+  const steps=[];
+  const s={line:null,note:'',hot:'',spin:'stopped',phase:'',
+    stack:[],micro:[],heap:[],binding:[],pool:[null,null,null,null],kernel:[],cbq:[],out:[]};
+  const api={
+    at(n){s.line=n;return api}, say(t){s.note=t;return api},
+    hot(h){s.hot=h;return api}, spin(t){s.spin=t;return api}, phase(p){s.phase=p;return api},
+    push(n,sub){s.stack.push({n,sub:sub||''});return api}, pop(){s.stack.pop();return api},
+    heap(l){s.heap.push({l});return api}, unheap(l){const i=s.heap.findIndex(x=>x.l===l);if(i>=0)s.heap.splice(i,1);return api},
+    bind(l){s.binding.push({l});return api}, unbind(){s.binding.pop();return api},
+    micro(l){s.micro.push({l});return api}, unmicro(){s.micro.shift();return api},
+    pool(i,l){s.pool[i]=l;return api}, unpool(i){s.pool[i]=null;return api},
+    kernel(l){s.kernel.push({l});return api}, unkernel(l){const i=s.kernel.findIndex(x=>x.l===l);if(i>=0)s.kernel.splice(i,1);return api},
+    cbq(l){s.cbq.push({l});return api}, uncbq(){s.cbq.shift();return api},
+    log(t){s.out.push(t);return api},
+    snap(){steps.push(JSON.parse(JSON.stringify(s)));return api},
+    done(){return steps}
+  };
+  return api;
+}
+
+const OPS = {};
+
+OPS.readfile = {
+  name:'fs.readFile() — the thread pool path',
+  code:["const fs = require('fs');","","fs.readFile('data.txt', (err, buf) => {","  console.log('read', buf.length, 'bytes');","});","","console.log('this line runs first');"],
+  build(){const t=T();
+    t.hot('v8').push('main()','module').at(1)
+     .say("V8 parses your source, Ignition turns it into bytecode, and execution begins on <b>V8's call stack</b>. One thread.").snap();
+    t.at(3).push('fs.readFile','lib/fs.js')
+     .say("<b>fs.readFile is JavaScript.</b> You are still inside V8, running Node's own core library. It validates the path and wraps your callback.").snap();
+    t.hot('bind').bind('FSReqCallback').heap('your callback + closure')
+     .say("Node's core JS calls into the <b>C++ binding</b>. It creates an <code>FSReqCallback</code> that <b>holds a reference to your JS callback</b> — which is why your callback (and everything it closes over) stays alive in V8's heap while the I/O is in flight.").snap();
+    t.hot('uv').unbind()
+     .say("The binding calls <code>uv_fs_read()</code>. Now <b>libuv</b> decides <i>how</i> to do the work. There is no portable async syscall for reading a file — <code>read(2)</code> blocks. So this goes to the <b>thread pool</b>.").snap();
+    t.hot('pool').pool(0,'read data.txt').pop()
+     .say("<b>Worker thread 1</b> does the blocking read. Meanwhile <code>fs.readFile</code> has already <b>returned</b> on the main thread — that is the async illusion, and a real OS thread is paying for it.").snap();
+    t.hot('v8').at(7).log('this line runs first')
+     .say("The main thread carries straight on. This is the entire point.").snap();
+    t.hot('uv').pop().spin('spinning').phase('poll').at(null)
+     .say("<b>main() pops — the call stack is empty.</b> Only now can libuv's loop turn. It runs through its phases and <b>parks in poll</b>, waiting for something to happen.").snap();
+    t.hot('pool').unpool(0).cbq('readFile cb + Buffer')
+     .say("The worker finishes, writes the result into a Buffer, signals the loop, and is <b>released back to the pool</b>. The callback is now queued.").snap();
+    t.hot('uv').phase('poll').uncbq()
+     .say("The loop, in the <b>poll</b> phase, picks up the completed I/O.").snap();
+    t.hot('v8').push('your callback','from poll').at(4).unheap('your callback + closure')
+     .say("libuv calls back <i>into</i> V8. Your callback is finally pushed onto the call stack — on the <b>same single thread</b> as everything else.").snap();
+    t.at(4).log('read 1024 bytes').snap();
+    t.pop().phase('').spin('idle').hot('')
+     .say("<b>Summary:</b> fs → binding → libuv → <b>thread pool</b> → loop → your callback. Four threads by default. Fire eight reads at once and only four run at a time — see the <b>Thread-pool lab</b>.").snap();
+    return t.done();}
+};
+
+OPS.http = {
+  name:'https.get() — the kernel path (no threads!)',
+  code:["const https = require('https');","","https.get('https://example.com', (res) => {","  console.log('status', res.statusCode);","});","","console.log('this line runs first');"],
+  build(){const t=T();
+    t.hot('v8').push('main()','module').at(1)
+     .say("Same start: your JS on V8's stack. <b>Watch the thread pool in this trace — it never gets used.</b>").snap();
+    t.at(3).push('https.get','lib/https.js')
+     .say("Again, this is Node's core JavaScript first — it builds the request and opens a socket.").snap();
+    t.hot('bind').bind('TCPWrap').heap('your callback + closure')
+     .say("Into the <b>C++ binding</b>: a <code>TCPWrap</code> is created wrapping the socket's file descriptor, holding your callback.").snap();
+    t.hot('uv').unbind()
+     .say("The binding calls <code>uv_tcp_connect()</code>. libuv now makes a <b>different decision</b> than it did for the file. The kernel <i>can</i> tell us when a socket is ready — so no thread is needed.").snap();
+    t.hot('kernel').kernel('socket fd 12 · watched').pop()
+     .say("The socket is <b>registered with the kernel</b> — <code>epoll</code> on Linux, <code>kqueue</code> on macOS, <code>IOCP</code> on Windows. <b>Look at the thread pool: completely empty.</b> This is the single most misunderstood thing about Node.").snap();
+    t.hot('v8').at(7).log('this line runs first')
+     .say("Main thread carries on, as before.").snap();
+    t.hot('uv').pop().spin('spinning').phase('poll').at(null)
+     .say("Stack empty → the loop turns and <b>parks in the poll phase</b>. <code>epoll_wait()</code> blocks here — <i>on the main thread</i> — watching every socket at once.").snap();
+    t.hot('kernel')
+     .say("You could register <b>10,000 sockets</b> and the loop would still watch them all from this one place, with zero extra threads. That is how Node serves huge numbers of connections on 4 pool threads it never touches.").snap();
+    t.hot('kernel').unkernel('socket fd 12 · watched').cbq('response cb')
+     .say("Bytes arrive. The kernel marks the fd readable, <code>epoll_wait</code> returns, and libuv queues your callback.").snap();
+    t.hot('v8').uncbq().push('your callback','from poll').at(4).unheap('your callback + closure')
+     .say("Back into V8, on the same one thread.").snap();
+    t.at(4).log('status 200').snap();
+    t.pop().phase('').spin('idle').hot('')
+     .say("<b>Summary:</b> network I/O = <b>kernel</b>, not the pool. <i>One sneaky exception:</i> <code>dns.lookup()</code> — which runs implicitly when you pass a hostname — <b>does</b> use the thread pool, because <code>getaddrinfo</code> blocks. That is a classic hidden bottleneck.").snap();
+    return t.done();}
+};
+
+OPS.crypto = {
+  name:'crypto.pbkdf2() — CPU work on the pool',
+  code:["const crypto = require('crypto');","","crypto.pbkdf2('pw', 'salt', 100000, 64, 'sha512',","  (err, key) => {","    console.log('derived key');","  });","","console.log('this line runs first');"],
+  build(){const t=T();
+    t.hot('v8').push('main()','module').at(1)
+     .say("Nothing here touches the disk or the network. This is <b>pure CPU work</b> — and it still goes to the thread pool.").snap();
+    t.at(3).push('crypto.pbkdf2','lib/crypto.js').hot('bind').bind('PBKDF2Job')
+     .say("Node's crypto JS calls the binding, which builds a job for OpenSSL.").snap();
+    t.hot('pool').unbind().pool(0,'pbkdf2 100k iters').pop()
+     .say("The job is handed to a <b>pool thread</b>. The pool is not only for I/O — it exists for <b>anything that would block</b>, including heavy computation.").snap();
+    t.hot('v8').at(8).log('this line runs first')
+     .say("The main thread stays responsive. This is exactly what <code>crypto.pbkdf2Sync()</code> would <i>not</i> do — the sync version would freeze the whole server.").snap();
+    t.hot('uv').pop().spin('spinning').phase('poll')
+     .say("Stack empty, loop spinning, waiting.").snap();
+    t.hot('pool').unpool(0).cbq('pbkdf2 cb')
+     .say("The worker finishes the key derivation and releases the thread.").snap();
+    t.hot('v8').uncbq().push('your callback','from poll').at(5).log('derived key').snap();
+    t.pop().phase('').spin('idle').hot('')
+     .say("<b>Summary:</b> pool work isn't just files. <code>pbkdf2</code>, <code>scrypt</code>, <code>bcrypt</code>, <code>zlib</code> all queue for the same <b>4 threads</b>. Hash 8 passwords at once on a 4-thread pool and half of them <i>wait</i> — even though nothing is doing I/O. Try it in the <b>lab</b>.").snap();
+    return t.done();}
+};
+
+OPS.timer = {
+  name:'setTimeout() — offloaded to nobody',
+  code:["console.log('start');","","setTimeout(() => {","  console.log('timer fired');","}, 100);","","console.log('end');"],
+  build(){const t=T();
+    t.hot('v8').push('main()','module').at(1).log('start').snap();
+    t.at(3).push('setTimeout','lib/timers.js').heap('your callback')
+     .say("Node's timers module runs. There is <b>no C++ work, no thread, no kernel call</b> here.").snap();
+    t.hot('uv').pop().phase('').spin('stopped')
+     .kernel('timers heap · due at +100ms')
+     .say("libuv simply inserts an entry into its <b>timers min-heap</b> — a sorted list of due times. That is the whole mechanism. Nothing is 'running' your timer.").snap();
+    t.hot('v8').at(7).log('end').snap();
+    t.hot('uv').pop().spin('spinning').phase('timers').at(null)
+     .say("Stack empty → the loop turns. On <b>each</b> pass it checks the <b>timers</b> phase: <i>is anything at the top of the heap due yet?</i> Not yet.").snap();
+    t.phase('poll')
+     .say("Nothing due, nothing to poll. The loop calculates <i>how long until the next timer</i> and blocks in <b>poll</b> for exactly that long. It doesn't spin hot — it sleeps.").snap();
+    t.phase('timers').unkernel('timers heap · due at +100ms').cbq('timer cb')
+     .say("~100 ms later, the loop comes round to <b>timers</b>, sees the entry is due, and queues your callback.").snap();
+    t.hot('v8').uncbq().push('timer cb','timers phase').at(4).log('timer fired').unheap('your callback').snap();
+    t.pop().phase('').spin('idle').hot('')
+     .say("<b>Summary:</b> the delay is a <b>minimum, not a promise</b>. If the stack is busy when the timer comes due, it just waits. A 100 ms timer behind a 3-second blocking loop fires at 3 seconds.").snap();
+    return t.done();}
+};
+
+OPS.promise = {
+  name:'Promise.resolve() — never leaves V8',
+  code:["console.log('A');","","Promise.resolve().then(() => {","  console.log('C');","});","","setTimeout(() => console.log('D'), 0);","","console.log('B');"],
+  build(){const t=T();
+    t.hot('v8').push('main()','module').at(1).log('A').snap();
+    t.at(3).micro('then → C').heap('promise + callback')
+     .say("The promise is already resolved, so V8 puts the callback straight into <b>its own microtask queue</b>. <b>libuv is not involved at all.</b> No binding, no thread, no kernel. Promises are a <i>language</i> feature.").snap();
+    t.hot('uv').at(7).kernel('timers heap · due at +0ms')
+     .say("The <code>setTimeout</code>, by contrast, <i>does</i> cross into libuv — it goes into the timers heap.").snap();
+    t.hot('v8').at(9).log('B').snap();
+    t.hot('v8').pop().at(null)
+     .say("<b>main() pops.</b> Before libuv gets a single turn, Node tells V8: <b>drain the microtask queue</b>.").snap();
+    t.hot('v8').unmicro().push('then → C','microtask').at(4).log('C').unheap('promise + callback')
+     .say("The microtask runs — <b>entirely inside V8</b>, before the event loop moves at all.").snap();
+    t.hot('uv').pop().spin('spinning').phase('timers').unkernel('timers heap · due at +0ms').cbq('timer cb')
+     .say("<i>Now</i> libuv gets its turn, reaches the <b>timers</b> phase, and finds the 0 ms timer due.").snap();
+    t.hot('v8').uncbq().push('timer cb','timers phase').at(7).log('D').snap();
+    t.pop().phase('').spin('idle').hot('')
+     .say("<b>Output: A · B · C · D.</b> The lesson: the <b>microtask queue lives in V8</b>. Node drains it between every phase and after every callback — which is why promises always beat timers, and why an infinite promise chain can starve the loop libuv is trying to run.").snap();
+    return t.done();}
+};
+
+OPS.block = {
+  name:'A blocking loop — everything stops',
+  code:["setTimeout(() => console.log('timer'), 10);","","fs.readFile('a.txt', () => console.log('file'));","","// 3 seconds of synchronous work","const end = Date.now() + 3000;","while (Date.now() < end) {}","","console.log('finally done');"],
+  build(){const t=T();
+    t.hot('v8').push('main()','module').at(1).kernel('timers heap · due at +10ms')
+     .say("A timer is registered — due in 10 ms.").snap();
+    t.hot('pool').at(3).pool(0,'read a.txt')
+     .say("A file read is dispatched to a pool thread. So far, so normal.").snap();
+    t.hot('v8').at(7).push('while loop','blocking')
+     .say("Now a <b>3-second synchronous loop</b>. The V8 call stack is <b>occupied</b> — and it is the only thread that can run JavaScript.").snap();
+    t.hot('pool').unpool(0).cbq('readFile cb')
+     .say("The worker thread finishes the file read almost immediately and queues the callback. <b>The work is done.</b> But look at the stack…").snap();
+    t.hot('uv').spin('BLOCKED').phase('')
+     .say("…the stack is <b>still busy</b>, so <b>libuv's loop cannot turn</b>. The completed callback just sits in the queue. The event loop is not a separate thread — it runs <i>between</i> your JS, not alongside it.").snap();
+    t.hot('uv').spin('BLOCKED')
+     .say("The 10 ms timer comes due. Nobody notices — the timers phase is never reached. Incoming HTTP connections are not accepted. <b>Every</b> pending callback is stuck behind your loop.").snap();
+    t.hot('v8').pop().at(9).log('finally done')
+     .say("Three seconds later, the loop finally exits and the sync code finishes.").snap();
+    t.hot('uv').pop().spin('spinning').phase('timers').unkernel('timers heap · due at +10ms').cbq('timer cb')
+     .say("<b>Only now</b> can the stack empty and the loop turn. Everything that was waiting comes flooding out at once.").snap();
+    t.hot('v8').uncbq().push('readFile cb','poll').log('file').pop().snap();
+    t.hot('v8').uncbq().push('timer cb','timers').log('timer').pop()
+     .say("The 10 ms timer fired at ~3000 ms. It was never late by <i>its own</i> fault.").snap();
+    t.phase('').spin('idle').hot('')
+     .say("<b>Summary:</b> Node's concurrency only works if you <b>give the loop back</b>. CPU-heavy work belongs in <code>worker_threads</code>, a pool-backed API, or another process. This one behaviour explains most \"why is my Node server randomly slow\" bugs.").snap();
+    return t.done();}
+};
+
+let opKey='readfile', tSteps=[], ti=0, tTimer=null;
+const KW=/\b(const|let|var|function|return|async|await|new|require|while|if)\b/g;
+function hl(src){
+  return esc(src)
+    .replace(/(\/\/.*$)/gm,'<span class="tok-c">$1</span>')
+    .replace(/('[^']*')/g,'<span class="tok-s">$1</span>')
+    .replace(KW,'<span class="tok-k">$1</span>')
+    .replace(/\b(readFile|get|pbkdf2|setTimeout|resolve|then|log|now)\b/g,'<span class="tok-f">$1</span>')
+    .replace(/\b(\d+)\b/g,'<span class="tok-n">$1</span>');
+}
+function tLoad(k){
+  opKey=k; tSteps=OPS[k].build(); ti=0; tStop();
+  $('t-code').innerHTML = OPS[k].code
+    .map((l,n)=>`<div class="ln" data-l="${n+1}"><span class="n">${n+1}</span><span>${hl(l)||' '}</span></div>`).join('');
+  tRender();
+}
+function lane(el,list,cls,empty){
+  el.innerHTML = list.length ? list.map(x=>`<span class="chip ${cls}">${esc(x.l)}</span>`).join('')
+    : `<span class="chip dormant"><em>${empty}</em></span>`;
+  el.classList.toggle('hot', list.length>0);
+}
+function tRender(){
+  const s=tSteps[ti];
+  $('t-stepno').textContent = `${ti} / ${tSteps.length-1}`;
+  $('t-note').innerHTML = s.note;
+  document.querySelectorAll('#t-code .ln').forEach(el=>el.classList.toggle('on', Number(el.dataset.l)===s.line));
+
+  $('t-stack').innerHTML = s.stack.length
+    ? s.stack.map((f,n)=>`<div class="frame ${n===s.stack.length-1?'top':''}"><span>${esc(f.n)}</span><small>${esc(f.sub)}</small></div>`).join('')
+    : '<div class="chip dormant" style="border:0;background:none"><em>empty — libuv may now turn</em></div>';
+
+  lane($('t-micro'), s.micro, 'micro', 'empty');
+  lane($('t-heap'), s.heap, 'v8', 'nothing retained');
+  lane($('t-binding'), s.binding, 'kernel', 'idle — nothing crossing into C++');
+  lane($('t-kernel'), s.kernel, 'kernel', 'nothing registered');
+  lane($('t-cbq'), s.cbq, 'uv', 'empty');
+
+  $('t-pool').innerHTML = s.pool.map((p,i)=>
+    `<div class="thread ${p?'busy':''}"><b>thread ${i+1}</b>${p?esc(p):'idle'}</div>`).join('');
+
+  $('t-phases').innerHTML = PHASES.map(([p,d])=>
+    `<div class="ph ${s.phase===p?'on':''}"><span>${p}</span><small>${d}</small></div>`).join('');
+  $('t-spin').textContent = s.spin;
+
+  ['stack','micro','heap','phases','pool','kernel','cbq'].forEach(z=>$('z-'+z).classList.remove('hot'));
+  const HOT={ v8:['z-stack'], bind:[], uv:['z-phases'], pool:['z-pool'], kernel:['z-kernel'] };
+  (HOT[s.hot]||[]).forEach(z=>$(z).classList.add('hot'));
+  $('t-binding').classList.toggle('hot', s.hot==='bind' && s.binding.length>0);
+
+  $('t-out').innerHTML = s.out.length ? s.out.map(l=>`<div>${esc(l)}</div>`).join('')
+    : '<div class="ph2">no output yet</div>';
+
+  $('t-back').disabled = ti===0;
+  $('t-step').disabled = ti>=tSteps.length-1;
+  if(ti>=tSteps.length-1) tStop();
+}
+function tNext(){ if(ti<tSteps.length-1){ti++;tRender();} }
+function tPrev(){ if(ti>0){ti--;tRender();} }
+function tStop(){ clearInterval(tTimer); tTimer=null; $('t-play').textContent='Run'; }
+function tPlay(){ if(tTimer){tStop();return;} $('t-play').textContent='Pause';
+  tTimer=setInterval(()=>{ if(ti>=tSteps.length-1) tStop(); else tNext(); },1800); }
+
+$('op').innerHTML = Object.entries(OPS).map(([k,o])=>`<option value="${k}">${o.name}</option>`).join('');
+$('op').onchange = e=>tLoad(e.target.value);
+$('t-step').onclick=()=>{tStop();tNext();};
+$('t-back').onclick=()=>{tStop();tPrev();};
+$('t-play').onclick=tPlay;
+$('t-reset').onclick=()=>{tStop();ti=0;tRender();};
+
+/* ============================================================
+   TAB 3 — THREAD POOL LAB
+   ============================================================ */
+const LAB_OPS = {
+  readfile:{ label:'fs.readFile()',        path:'pool',   ms:40,  note:'file system' },
+  pbkdf2:  { label:'crypto.pbkdf2()',      path:'pool',   ms:120, note:'CPU — no I/O at all' },
+  dns:     { label:'dns.lookup()',         path:'pool',   ms:60,  note:'the hidden one' },
+  gzip:    { label:'zlib.gzip()',          path:'pool',   ms:70,  note:'compression' },
+  http:    { label:'https.get()',          path:'kernel', ms:90,  note:'network' },
+  socket:  { label:'net.connect()',        path:'kernel', ms:50,  note:'network' }
+};
+$('lab-op').innerHTML = Object.entries(LAB_OPS).map(([k,o])=>
+  `<option value="${k}">${o.label} — ${o.note}</option>`).join('');
+
+function labRun(){
+  const key=$('lab-op').value, op=LAB_OPS[key];
+  const n=+$('lab-n').value, pool=+$('lab-p').value;
+
+  const jobs=[];
+  if(op.path==='pool'){
+    const free=new Array(pool).fill(0);           // when each thread frees up
+    for(let i=0;i<n;i++){
+      let t=0; for(let j=1;j<pool;j++) if(free[j]<free[t]) t=j;
+      const start=free[t], end=start+op.ms;
+      free[t]=end;
+      jobs.push({i, start, end, thread:t+1, path:'pool'});
+    }
+  } else {
+    for(let i=0;i<n;i++) jobs.push({i, start:0, end:op.ms, thread:null, path:'kernel'});
+  }
+
+  const total=Math.max(...jobs.map(j=>j.end));
+  const pct=v=>(v/total*100);
+
+  $('lab-total').textContent = `wall clock ≈ ${total} ms`;
+  $('lab-gantt').innerHTML = jobs.map(j=>`
+    <div class="grow">
+      <div class="glabel">#${j.i+1}${j.thread?` · thread ${j.thread}`:' · kernel'}</div>
+      <div class="gtrack">
+        ${j.start>0? `<div class="gwait" style="left:0;width:${pct(j.start)}%">waiting for a thread</div>`:''}
+        <div class="gbar ${j.path}" style="left:${pct(j.start)}%;width:${pct(op.ms)}%">${op.ms}ms</div>
+      </div>
+    </div>`).join('');
+
+  const marks=[0,.25,.5,.75,1].map(f=>Math.round(total*f));
+  $('lab-axis').innerHTML = marks.map(m=>`<span>${m}ms</span>`).join('');
+
+  const waves=Math.ceil(n/pool);
+  const v=$('lab-verdict');
+  if(op.path==='pool'){
+    v.innerHTML = `<b>Thread-pool path</b><p>
+      <b>${n}</b> calls, <b>${pool}</b> threads → <b>${waves} wave${waves>1?'s':''}</b>.
+      ${n>pool
+        ? `Only ${pool} run at a time; the rest <b>queue</b>. Total time is roughly <code>ceil(${n}/${pool}) × ${op.ms}ms = ${total}ms</code> instead of ${op.ms}ms.`
+        : `Everything fits in one wave, so they all run in parallel.`}
+      Raise <code>UV_THREADPOOL_SIZE</code> and watch the waves collapse.</p>`;
+  } else {
+    v.innerHTML = `<b>Kernel path</b><p>
+      All <b>${n}</b> finish in <b>${op.ms}ms</b> — they run <b>fully in parallel</b>, and the thread pool is <b>never touched</b>.
+      Drag <code>UV_THREADPOOL_SIZE</code> anywhere you like: <b>nothing changes</b>. That is the whole point.
+      Sockets are watched by <code>epoll</code>/<code>kqueue</code>/<code>IOCP</code> from the one loop thread.</p>`;
+  }
+}
+['lab-n','lab-p'].forEach(id=>$(id).addEventListener('input',()=>{
+  $(id+'-v').textContent=$(id).value; labRun();
+}));
+$('lab-op').onchange=labRun;
+$('lab-run').onclick=labRun;
+
+/* ============================================================
+   TAB 4 — LOOP PHASES
+   ============================================================ */
+const PHASE_DETAIL = [
+  { t:'timers', q:'the timers min-heap',
+    b:["Runs callbacks whose <code>setTimeout</code> / <code>setInterval</code> threshold has <b>elapsed</b>.",
+       "The loop does not wake up <i>at</i> your deadline. It arrives here, checks a <b>min-heap</b> of due times, and runs whatever is ready. If it arrives late — because the stack was busy — your timer fires late.",
+       "This is the whole reason the delay is a <b>minimum, not a promise</b>."] },
+  { t:'pending', q:'deferred system callbacks',
+    b:["Runs a small set of system callbacks that libuv deferred from the <b>previous</b> iteration — mostly TCP errors such as <code>ECONNREFUSED</code>.",
+       "You will almost never think about this phase. It exists so libuv can report errors that arrived at an awkward moment."] },
+  { t:'idle, prepare', q:'libuv internals only',
+    b:["Internal libuv bookkeeping. <b>Nothing you write ever runs here.</b>",
+       "It exists so libuv can hook its own housekeeping in right before it goes to sleep in poll."] },
+  { t:'poll', q:'completed I/O — sockets, finished thread-pool work',
+    b:["<b>The important one.</b> It has two jobs: work out <i>how long to block for</i>, then process I/O events.",
+       "This is where the process <b>sleeps</b>. <code>epoll_wait</code> / <code>kqueue</code> / <code>IOCP</code> blocks here, <i>on the main thread</i>, watching every socket at once. Node is not burning CPU while idle — it is parked right here.",
+       "How long it blocks is calculated, not fixed: if a timer is due soon it blocks only until then; if <code>setImmediate</code> callbacks are already pending it does <b>not block at all</b>."] },
+  { t:'check', q:'setImmediate callbacks',
+    b:["Runs <code>setImmediate</code> callbacks.",
+       "It sits <b>deliberately right after poll</b> — which is exactly why <code>setImmediate</code> inside an I/O callback always beats <code>setTimeout(fn, 0)</code>. From poll, <i>check</i> is the very next stop; <i>timers</i> requires going all the way round again.",
+       "The name is a lie, by the way: <code>setImmediate</code> is <b>not</b> immediate, and <code>setTimeout(fn,0)</code> is not a timeout. Blame history."] },
+  { t:'close', q:'close events → then exit, or turn again',
+    b:["Runs <code>'close'</code> events — <code>socket.on('close')</code>, destroyed handles.",
+       "Then libuv asks: <b>are there any referenced handles or requests left?</b> A pending timer, an open socket, a queued pool job all count.",
+       "If yes, the loop turns again — back to <b>timers</b>. If no, the loop exits and the process ends. That is why a Node script with an open server never terminates, and one with nothing pending does."] }
+];
+let pi=0;
+function pRender(){
+  $('pdots').innerHTML = PHASE_DETAIL.map((p,n)=>
+    `<button class="pdot" aria-current="${n===pi}" data-i="${n}">${n+1}. ${p.t}</button>`).join('')
+    + '<span class="pdot skip">↻ back to timers</span>';
+  document.querySelectorAll('.pdot[data-i]').forEach(b=>b.onclick=()=>{ pi=+b.dataset.i; pRender(); });
+
+  const p=PHASE_DETAIL[pi];
+  $('p-count').textContent = `${pi+1} of 6`;
+  $('p-title').textContent = p.t;
+  $('p-body').innerHTML = p.b.map(x=>`<p style="font-size:13px;line-height:1.6;margin:0 0 9px">${x}</p>`).join('');
+  $('p-queue').textContent = p.q;
+  $('p-turn').textContent = pi===5 ? 'next wraps round — that is the loop' : 'one full circuit = one iteration';
+}
+$('p-next').onclick = ()=>{ pi=(pi+1)%6; pRender(); };
+$('p-prev').onclick = ()=>{ pi=(pi+5)%6; pRender(); };
+
+/* ============================================================
+   Tabs
+   ============================================================ */
+function setTab(t){
+  ['layers','phases','trace','lab'].forEach(k=>{
+    $('tab-'+k).setAttribute('aria-selected', k===t);
+    $('view-'+k).hidden = k!==t;
+  });
+  tStop();
+}
+$('tab-layers').onclick=()=>setTab('layers');
+$('tab-phases').onclick=()=>setTab('phases');
+$('tab-trace').onclick =()=>setTab('trace');
+$('tab-lab').onclick   =()=>setTab('lab');
+
+document.addEventListener('keydown',e=>{
+  if(['SELECT','INPUT','TEXTAREA'].includes(e.target.tagName)) return;
+  if(!$('view-phases').hidden){
+    if(e.key==='ArrowRight'){ e.preventDefault(); pi=(pi+1)%6; pRender(); }
+    if(e.key==='ArrowLeft'){ e.preventDefault(); pi=(pi+5)%6; pRender(); }
+    return;
+  }
+  if($('view-trace').hidden) return;
+  if(e.key==='ArrowRight'){ e.preventDefault(); tStop(); tNext(); }
+  if(e.key==='ArrowLeft'){ e.preventDefault(); tStop(); tPrev(); }
+  if(e.key===' '){ e.preventDefault(); tPlay(); }
+});
+
+renderLayers();
+pRender();
+tLoad('readfile');
+labRun();
+</script>
+<footer class="site-footer">Built with AI from a prompt by <a href="https://github.com/gsmithun4" target="_blank" rel="noopener noreferrer">gsmithun4</a>.</footer>
+</body>
+</html>

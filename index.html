@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Node Architecture Portal</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <style>
+    :root{
+      --paper:#E6E8E3;
+      --panel:#FAFAF8;
+      --panel-2:#F1F2EE;
+      --ink:#191D1E;
+      --ink-2:#5C6461;
+      --rule:#CBD0C8;
+      --ok:#0E6E63;
+      --bad:#B03A3A;
+      --mono:'IBM Plex Mono',ui-monospace,monospace;
+      --disp:'Space Grotesk',system-ui,sans-serif;
+    }
+    *{box-sizing:border-box}
+    html,body{margin:0}
+    body{
+      min-height:100vh;
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      padding:18px;
+      color:var(--ink);
+      font-family:var(--disp);
+      background:var(--paper);
+      background-image:linear-gradient(var(--rule) 1px,transparent 1px),linear-gradient(90deg,var(--rule) 1px,transparent 1px);
+      background-size:28px 28px;
+      background-position:-1px -1px;
+    }
+    .wrap{width:min(740px,100%)}
+    .card{
+      background:var(--panel);
+      border:1.5px solid var(--ink);
+      border-radius:2px;
+      padding:16px;
+      box-shadow:0 2px 12px rgba(25,29,30,.08);
+    }
+    h1{margin:0;font-size:clamp(24px,4.2vw,36px);line-height:1.05;letter-spacing:-.02em}
+    .sub{margin:6px 0 0;font-family:var(--mono);font-size:11px;color:var(--ink-2)}
+
+    form{margin-top:14px;display:grid;gap:10px}
+    label{font-family:var(--mono);font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-2)}
+    input{
+      margin-top:5px;
+      width:100%;
+      border:1.5px solid var(--ink);
+      background:var(--panel-2);
+      border-radius:2px;
+      padding:10px;
+      font-family:var(--mono);
+      font-size:12px;
+    }
+    button{
+      margin-top:4px;
+      border:1.5px solid var(--ink);
+      background:var(--ink);
+      color:var(--panel);
+      border-radius:2px;
+      padding:10px 12px;
+      font-family:var(--mono);
+      font-size:12px;
+      cursor:pointer;
+    }
+    button:hover{background:#000}
+    .msg{margin-top:10px;font-family:var(--mono);font-size:11px;min-height:16px}
+    .msg.bad{color:var(--bad)}
+    .msg.ok{color:var(--ok)}
+
+    .links{margin-top:14px;border-top:1.5px solid var(--rule);padding-top:12px}
+    .links h2{margin:0 0 10px;font-family:var(--mono);font-size:11px;letter-spacing:.08em;text-transform:uppercase}
+    .links a{
+      display:block;
+      margin-bottom:8px;
+      text-decoration-thickness:1.5px;
+      color:var(--ink);
+      font-weight:600;
+    }
+
+    .site-footer{
+      margin-top:14px;
+      padding-top:10px;
+      border-top:1.5px solid var(--ink);
+      font-family:var(--mono);
+      font-size:10.5px;
+      color:var(--ink-2);
+    }
+    .site-footer a{color:var(--ink)}
+  </style>
+</head>
+<body>
+  <main class="wrap">
+    <section class="card">
+      <h1>Node Architecture Portal</h1>
+      <p class="sub">Login first, then open the visual explainers.</p>
+
+      <form id="login-form" autocomplete="off">
+        <label>Username
+          <input id="username" name="username" type="text" required>
+        </label>
+        <label>Password
+          <input id="password" name="password" type="password" required>
+        </label>
+        <button type="submit">Enter</button>
+      </form>
+
+      <p id="message" class="msg"></p>
+
+      <section id="links" class="links" hidden>
+        <h2>Available Pages</h2>
+        <a href="pages/js-runtime-visualizer-v2.html">JavaScript Runtime Visualizer</a>
+        <a href="pages/nodejs-architecture.html">Inside Node.js Architecture</a>
+        <a href="pages/who-does-what.html">Who Does What</a>
+      </section>
+
+      <footer class="site-footer">Built with AI from a prompt by <a href="https://github.com/gsmithun4" target="_blank" rel="noopener noreferrer">gsmithun4</a>.</footer>
+    </section>
+  </main>
+
+  <script>
+    const LOGIN_USER = "i_love_js";
+    const LOGIN_PASS = "i_love_js";
+
+    console.log(
+      "Real dev habit unlocked: opening the console first. Hood-up engineering energy is valid. Access details -> username: " +
+      LOGIN_USER +
+      " | password: " +
+      LOGIN_PASS
+    );
+
+    const form = document.getElementById("login-form");
+    const msg = document.getElementById("message");
+    const links = document.getElementById("links");
+
+    form.addEventListener("submit", function (event) {
+      event.preventDefault();
+      const user = document.getElementById("username").value.trim();
+      const pass = document.getElementById("password").value;
+
+      if (user === LOGIN_USER && pass === LOGIN_PASS) {
+        msg.textContent = "Access granted. Choose a page below.";
+        msg.className = "msg ok";
+        links.hidden = false;
+      } else {
+        msg.textContent = "Invalid username or password.";
+        msg.className = "msg bad";
+        links.hidden = true;
+      }
+    });
+  </script>
+</body>
+</html>
