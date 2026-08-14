@@ -78,11 +78,27 @@
     .links h2{margin:0 0 10px;font-family:var(--mono);font-size:11px;letter-spacing:.08em;text-transform:uppercase}
     .links a{
       display:block;
-      margin-bottom:8px;
-      text-decoration-thickness:1.5px;
+      margin-bottom:10px;
+      text-decoration:none;
       color:var(--ink);
       font-weight:600;
+      font-size:14px;
     }
+    .links a b{
+      text-decoration:underline;
+      text-decoration-thickness:1.5px;
+      font-weight:600;
+    }
+    .links a span{
+      display:block;
+      margin-top:2px;
+      font-family:var(--mono);
+      font-size:10.5px;
+      font-weight:400;
+      color:var(--ink-2);
+      line-height:1.5;
+    }
+    .links a:hover span{color:var(--ink)}
 
     .site-footer{
       margin-top:14px;
@@ -115,9 +131,18 @@
 
       <section id="links" class="links" hidden>
         <h2>Available Pages</h2>
-        <a href="pages/js-runtime-visualizer-v2.html">JavaScript Runtime Visualizer</a>
-        <a href="pages/nodejs-architecture.html">Inside Node.js Architecture</a>
-        <a href="pages/who-does-what.html">Who Does What</a>
+        <a href="pages/js-runtime-visualizer-v3.html"><b>Inside Node.js — Runtime, Loop &amp; Threads</b>
+          <span>v3 · everything in one place: guided traces, live sandbox, layers, poll phase &amp; the thread pool</span></a>
+        <a href="pages/js-runtime-visualizer-v2.html"><b>The JavaScript Runtime — Execution &amp; Ownership</b>
+          <span>v2 · call stack, scope chain and queues, with a browser/Node toggle</span></a>
+        <a href="pages/nodejs-architecture.html"><b>Inside Node.js — V8, libuv &amp; the Architecture</b>
+          <span>the layers, the six loop phases, tracing an operation, thread-pool lab</span></a>
+        <a href="pages/poll-phase.html"><b>Inside the Poll Phase</b>
+          <span>how long the loop blocks, how it wakes, why setImmediate wins</span></a>
+        <a href="pages/event-loop-ring.html"><b>The libuv Event Loop — One Lap, Animated</b>
+          <span>a single iteration of the loop, drawn as a ring</span></a>
+        <a href="pages/who-does-what.html"><b>Who Does What</b>
+          <span>V8 · Node · libuv · kernel — which engine owns which job</span></a>
       </section>
 
       <footer class="site-footer">Built with AI from a prompt by <a href="https://github.com/gsmithun4" target="_blank" rel="noopener noreferrer">gsmithun4</a>.</footer>

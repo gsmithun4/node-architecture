@@ -1,0 +1,464 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The libuv Event Loop — One Lap, Animated</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --paper:#E6E8E3; --panel:#FAFAF8; --panel-2:#F1F2EE;
+    --ink:#191D1E; --ink-2:#5C6461; --ink-3:#8E9591; --rule:#CBD0C8;
+    --uv:#0E6E63; --micro:#6D4AC7; --tick:#B03A3A; --check:#B4740A; --sync:#191D1E;
+    --dormant:#9AA29D; --hl:#FFF3C4;
+    --shadow:0 1px 0 rgba(25,29,30,.06), 0 2px 8px rgba(25,29,30,.05);
+    --mono:'IBM Plex Mono',ui-monospace,monospace;
+    --disp:'Space Grotesk',system-ui,sans-serif;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0}
+  body{
+    background:var(--paper);
+    background-image:linear-gradient(var(--rule) 1px,transparent 1px),linear-gradient(90deg,var(--rule) 1px,transparent 1px);
+    background-size:28px 28px; background-position:-1px -1px;
+    color:var(--ink); font-family:var(--disp); -webkit-font-smoothing:antialiased; padding:18px;
+  }
+  .wrap{max-width:1180px;margin:0 auto}
+  header{display:flex;flex-wrap:wrap;gap:16px;align-items:flex-end;justify-content:space-between;
+    padding-bottom:14px;border-bottom:1.5px solid var(--ink)}
+  h1{font-size:clamp(19px,2.4vw,27px);font-weight:700;letter-spacing:-.02em;margin:0;line-height:1.05}
+  h1 em{font-style:normal;color:var(--ink-3)}
+  .sub{font-family:var(--mono);font-size:11px;color:var(--ink-2);margin-top:5px}
+
+  select,button{font-family:var(--mono);font-size:12px;color:var(--ink);background:var(--panel);
+    border:1.5px solid var(--ink);border-radius:2px;padding:7px 11px;cursor:pointer;transition:transform .08s ease,background .12s ease}
+  button:hover:not(:disabled){background:var(--ink);color:var(--panel)}
+  button:active:not(:disabled){transform:translateY(1px)}
+  button:disabled{opacity:.35;cursor:not-allowed}
+  button.primary{background:var(--ink);color:var(--panel)}
+  :focus-visible{outline:2.5px solid var(--micro);outline-offset:2px}
+  .controls{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:14px 0}
+  .controls .spacer{flex:1}
+  label.speed{font-family:var(--mono);font-size:10.5px;color:var(--ink-2);display:flex;align-items:center;gap:7px}
+  input[type=range]{width:110px}
+
+  .narrate{display:flex;gap:12px;align-items:center;background:var(--ink);color:#F2F3F0;border-radius:2px;
+    padding:11px 14px;margin-bottom:14px;min-height:46px}
+  .badge{font-family:var(--mono);font-size:10.5px;font-weight:600;padding:5px 9px;border-radius:2px;white-space:nowrap;background:rgba(255,255,255,.14)}
+  .narrate p{margin:0;font-size:13.5px;line-height:1.45}
+  .narrate b{font-weight:600;border-bottom:1.5px solid rgba(255,255,255,.45)}
+
+  .grid{display:grid;grid-template-columns:minmax(0,1.15fr) minmax(0,.85fr);gap:16px;align-items:start}
+
+  /* ---- ring ---- */
+  .ringcard{background:var(--panel);border:1.5px solid var(--ink);border-radius:2px;box-shadow:var(--shadow);padding:12px}
+  .ringwrap{position:relative;width:100%;aspect-ratio:1;max-width:520px;margin:0 auto}
+  .ringwrap svg{position:absolute;inset:0;width:100%;height:100%}
+  .node{position:absolute;transform:translate(-50%,-50%);width:118px;text-align:center;
+    border:1.5px solid var(--rule);border-radius:3px;background:var(--panel);padding:6px 4px;transition:all .18s ease}
+  .node.active{border-color:var(--uv);border-width:2px;background:#fff;box-shadow:0 4px 14px rgba(14,110,99,.22);z-index:3}
+  .node.passed{opacity:.5}
+  .node .nname{font-family:var(--mono);font-size:11px;font-weight:600;letter-spacing:.02em}
+  .node.active .nname{color:var(--uv)}
+  .node .nsub{font-family:var(--mono);font-size:8px;color:var(--ink-3);margin-top:1px;line-height:1.3}
+  .node .nq{display:flex;gap:2px;justify-content:center;flex-wrap:wrap;margin-top:4px;min-height:14px}
+  .qmini{font-family:var(--mono);font-size:8px;padding:1px 3px;border-radius:2px;border:1.5px solid var(--uv);color:var(--uv);background:var(--panel-2);animation:pop .2s ease-out}
+  .qmini.empty{border:0;color:var(--ink-3);background:none;font-style:italic}
+  @keyframes pop{from{opacity:0;transform:scale(.6)}to{opacity:1;transform:none}}
+
+  .marker{position:absolute;width:20px;height:20px;transform:translate(-50%,-50%);z-index:4;pointer-events:none}
+  .marker .dot{width:20px;height:20px;border-radius:50%;background:var(--uv);border:2.5px solid var(--panel);
+    box-shadow:0 0 0 2px var(--uv), 0 0 16px rgba(14,110,99,.5)}
+  .marker.sleeping .dot{background:var(--dormant);box-shadow:0 0 0 2px var(--dormant);animation:breathe 1.1s ease-in-out infinite}
+  @keyframes breathe{0%,100%{transform:scale(1);opacity:.7}50%{transform:scale(1.25);opacity:1}}
+
+  .hub{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:132px;height:132px;border-radius:50%;
+    border:1.5px solid var(--ink);background:var(--panel);display:flex;flex-direction:column;align-items:center;
+    justify-content:center;text-align:center;gap:2px;z-index:2}
+  .hub .hlbl{font-family:var(--mono);font-size:9px;letter-spacing:.1em;text-transform:uppercase;color:var(--ink-3)}
+  .hub .hlap{font-family:var(--disp);font-size:26px;font-weight:700;line-height:1}
+  .hub .hlap small{font-size:11px;font-weight:500;color:var(--ink-3)}
+  .hub.draining{border-color:var(--micro);box-shadow:0 0 0 4px rgba(109,74,199,.14)}
+  .hub .hdrain{font-family:var(--mono);font-size:8.5px;color:var(--micro);font-weight:600;min-height:11px;line-height:1.2}
+
+  /* between-phase chips floating at hub */
+  .betweenlane{position:absolute;left:50%;top:calc(50% + 78px);transform:translateX(-50%);display:flex;gap:4px;z-index:5}
+  .bchip{font-family:var(--mono);font-size:9px;padding:2px 6px;border-radius:2px;border:1.5px solid;background:var(--panel);animation:pop .2s ease-out;white-space:nowrap}
+  .bchip.tick{border-color:var(--tick);color:var(--tick)}
+  .bchip.micro{border-color:var(--micro);color:var(--micro)}
+
+  /* ---- right column ---- */
+  .col{display:flex;flex-direction:column;gap:14px;min-width:0}
+  .card{background:var(--panel);border:1.5px solid var(--ink);border-radius:2px;box-shadow:var(--shadow);overflow:hidden}
+  .card>h2{font-family:var(--mono);font-size:10.5px;font-weight:600;letter-spacing:.1em;text-transform:uppercase;
+    margin:0;padding:8px 11px;border-bottom:1.5px solid var(--ink);display:flex;justify-content:space-between;gap:8px;align-items:center}
+  .card>h2 span{color:var(--ink-3);font-weight:400;text-transform:none;letter-spacing:.02em;font-size:10px}
+  .body{padding:11px}
+  .detail h3{margin:0;font-family:var(--mono);font-size:15px;font-weight:600;color:var(--uv)}
+  .detail .dphase{font-family:var(--mono);font-size:9.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--ink-3);margin-bottom:6px}
+  .detail p{margin:8px 0 0;font-size:12.5px;line-height:1.55;color:var(--ink-2)}
+  .detail p b{color:var(--ink);font-weight:600}
+  .detail code{font-family:var(--mono);font-size:11px;background:var(--panel-2);border:1px solid var(--rule);border-radius:2px;padding:0 3px}
+  .drainrow{display:flex;align-items:center;gap:7px;margin-top:10px;padding:6px 8px;border:1.5px dashed var(--micro);
+    border-radius:2px;font-family:var(--mono);font-size:10px;color:var(--micro)}
+  .drainrow i{width:7px;height:7px;border-radius:50%;background:var(--micro)}
+
+  .out{background:var(--ink);border-radius:2px;padding:9px 10px;min-height:80px;max-height:220px;overflow:auto;
+    font-family:var(--mono);font-size:11.5px;line-height:1.7;color:#EDEEEA}
+  .out div{animation:pop .2s ease-out;display:flex;gap:8px}
+  .out .idx{color:var(--dormant)}
+  .out .tag{margin-left:auto;font-size:9px;padding:0 5px;border-radius:2px;opacity:.85}
+  .out .tag.timers{color:#7FD1C7}.out .tag.poll{color:#7FD1C7}.out .tag.check{color:#E0B15A}
+  .out .tag.tick{color:#E88}.out .tag.micro{color:#B79CE8}
+  .out .ph{color:var(--ink-3)}
+
+  .legend{display:flex;gap:14px;flex-wrap:wrap;margin-top:14px;padding-top:10px;border-top:1.5px solid var(--ink);
+    font-family:var(--mono);font-size:10.5px;color:var(--ink-2)}
+  .legend span{display:flex;align-items:center;gap:5px}
+  .dot{width:9px;height:9px;border-radius:50%;flex:0 0 auto}
+
+  .site-footer{
+    margin-top:16px;
+    padding-top:10px;
+    border-top:1.5px solid var(--ink);
+    font-family:var(--mono);
+    font-size:10.5px;
+    color:var(--ink-2);
+  }
+  .site-footer a{color:var(--ink);text-decoration-thickness:1.5px}
+
+  @media (max-width:900px){ .grid{grid-template-columns:1fr} }
+  @media (prefers-reduced-motion:reduce){ *{animation:none!important;transition:none!important} }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div>
+      <h1>The libuv Event Loop <em>— one lap, animated</em></h1>
+      <div class="sub">watch the loop turn through its six phases · nextTick + microtasks drain between each</div>
+    </div>
+  </header>
+
+  <div class="controls">
+    <select id="scenario" aria-label="Scenario"></select>
+    <button id="play" class="primary">▶ Run</button>
+    <button id="step">Step</button>
+    <button id="reset">Reset</button>
+    <div class="spacer"></div>
+    <label class="speed">speed <input type="range" id="speed" min="1" max="5" value="3"></label>
+  </div>
+
+  <div class="narrate">
+    <span class="badge" id="badge">idle</span>
+    <p id="note">Pick a scenario and press <b>Run</b> to watch one full turn of the loop. Or <b>Step</b> through it beat by beat.</p>
+  </div>
+
+  <div class="grid">
+    <div class="ringcard">
+      <div class="ringwrap" id="ringwrap">
+        <svg viewBox="0 0 400 400" aria-hidden="true">
+          <circle cx="200" cy="200" r="150" fill="none" stroke="var(--rule)" stroke-width="2"/>
+          <circle id="progress" cx="200" cy="200" r="150" fill="none" stroke="var(--uv)" stroke-width="2.5"
+                  stroke-linecap="round" stroke-dasharray="0 942" transform="rotate(-90 200 200)"/>
+          <!-- direction arrows -->
+          <g fill="var(--ink-3)" id="arrows"></g>
+        </svg>
+        <div class="hub" id="hub">
+          <div class="hlbl">libuv loop</div>
+          <div class="hlap">lap&nbsp;<span id="lapn">1</span></div>
+          <div class="hdrain" id="hdrain"></div>
+        </div>
+        <div class="betweenlane" id="between"></div>
+        <div class="marker" id="marker"><div class="dot"></div></div>
+        <!-- nodes injected -->
+      </div>
+    </div>
+
+    <div class="col">
+      <section class="card">
+        <h2>Current phase <span id="beatn"></span></h2>
+        <div class="body detail" id="detail"></div>
+      </section>
+      <section class="card">
+        <h2>Console <span>execution order</span></h2>
+        <div class="body" style="padding:8px"><div class="out" id="out"></div></div>
+      </section>
+    </div>
+  </div>
+
+  <div class="legend">
+    <span><i class="dot" style="background:var(--uv)"></i>phase callback</span>
+    <span><i class="dot" style="background:var(--tick)"></i>process.nextTick</span>
+    <span><i class="dot" style="background:var(--micro)"></i>microtask (promise)</span>
+    <span><i class="dot" style="background:var(--dormant)"></i>poll sleeping</span>
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+
+/* ---- the six phases ---- */
+const PHASES = [
+  {key:'timers',  name:'timers',        sub:'setTimeout / setInterval',
+   desc:'Runs callbacks whose timer <b>threshold has elapsed</b>. The loop checks a min-heap of due times when it arrives here — it does not wake up <i>at</i> your deadline.'},
+  {key:'pending', name:'pending',       sub:'deferred system cbs',
+   desc:'Runs a few system callbacks deferred from the previous iteration — mostly TCP errors like <code>ECONNREFUSED</code>. You rarely think about this one.'},
+  {key:'idle',    name:'idle, prepare', sub:'internal',
+   desc:'Internal libuv bookkeeping. <b>Nothing you write runs here.</b> It exists so libuv can hook housekeeping in before it goes to sleep in poll.'},
+  {key:'poll',    name:'poll',          sub:'I/O · sleeps here',
+   desc:'The important one. Processes I/O events and decides <b>how long to block</b>. This is where the process <b>sleeps</b> — <code>epoll_wait</code> blocks here, watching every socket at once.'},
+  {key:'check',   name:'check',         sub:'setImmediate',
+   desc:'Runs <code>setImmediate</code> callbacks. It sits <b>right after poll</b> — which is why setImmediate beats setTimeout(0) when both are scheduled from inside an I/O callback.'},
+  {key:'close',   name:'close',         sub:"'close' events",
+   desc:'Runs <code>close</code> events, then asks: <b>are any referenced handles left?</b> If yes, the loop turns again. If no, it exits and the process ends.'}
+];
+const KEYS = PHASES.map(p=>p.key);
+
+/* node positions on the ring, radius 40% of the square */
+function nodeXY(i){ const a=(-90 + i*60)*Math.PI/180; return [50+40*Math.cos(a), 50+40*Math.sin(a)]; }
+
+/* ---- scenarios: seed the queues, and let callbacks schedule more ---- */
+const SCEN = {
+  tour:{
+    name:'A full lap — every phase does something',
+    seed:{ timers:[cb('timer A'), cb('timer B')], poll:[cb('I/O read')], check:[cb('immediate')], close:[cb("socket close")] },
+    tick:[cb('nextTick')], micro:[cb('promise')]
+  },
+  io:{
+    name:'I/O callback schedules a timer + an immediate',
+    seed:{ poll:[ cb('I/O read', {timers:'setTimeout cb', check:'setImmediate cb', tick:'nextTick cb', micro:'promise cb'}) ] }
+  },
+  sleep:{
+    name:'Nothing to do — poll sleeps, then a timer fires',
+    seed:{},
+    future:[cb('setTimeout 100ms')]   // becomes due while poll blocks
+  },
+  micro:{
+    name:'nextTick + microtasks drain between phases',
+    seed:{ timers:[ cb('timer', {tick:'nextTick', micro:'promise'}) ], check:[cb('immediate')] }
+  }
+};
+function cb(label, sched){ return {label, sched:sched||null}; }
+
+/* ---- engine: discrete beats ---- */
+let S, scenKey='tour';
+function fresh(k){
+  scenKey=k;
+  const sc=SCEN[k];
+  const q={timers:[],pending:[],idle:[],poll:[],check:[],close:[]};
+  for(const key in (sc.seed||{})) q[key]=sc.seed[key].map(c=>({...c}));
+  S={
+    q, tick:(sc.tick||[]).map(c=>({...c})), micro:(sc.micro||[]).map(c=>({...c})),
+    future:(sc.future||[]).map(c=>({...c})),
+    phase:0, lap:1, mode:'enter', out:[], beat:0, done:false, sleeping:false,
+    lastFired:null, draining:null, between:[]
+  };
+}
+
+/* advance one beat; returns false when done */
+function advance(){
+  if(S.done) return false;
+  S.beat++;
+  S.between=[]; S.draining=null; S.lastFired=null; S.sleeping=false;
+  const ph = KEYS[S.phase];
+
+  if(S.mode==='enter'){
+    // deliver future timers if we're about to sleep in poll
+    if(ph==='poll' && S.q.poll.length===0 && S.future.length && emptyElsewhere()){
+      S.sleeping=true;
+      S.note='poll';
+      S.q.timers.push(...S.future.splice(0)); // they became due during the wait
+      S.mode='leave';
+      return true;
+    }
+    S.mode = S.q[ph].length ? 'run' : 'leave';
+    return true;
+  }
+
+  if(S.mode==='run'){
+    const c = S.q[ph].shift();
+    S.out.push({label:c.label, tag:ph});
+    S.lastFired=c.label;
+    if(c.sched){
+      for(const key in c.sched){
+        const item=cb(c.sched[key]);
+        if(key==='tick') S.tick.push(item);
+        else if(key==='micro') S.micro.push(item);
+        else S.q[key].push(item);
+      }
+    }
+    S.mode = S.q[ph].length ? 'run' : 'leave';
+    return true;
+  }
+
+  if(S.mode==='leave'){
+    // between-phase checkpoint: nextTick fully, then microtasks fully
+    if(S.tick.length){
+      const c=S.tick.shift(); S.out.push({label:c.label, tag:'tick'});
+      S.draining='tick'; S.between=[{label:c.label,cls:'tick'}];
+      return true;
+    }
+    if(S.micro.length){
+      const c=S.micro.shift(); S.out.push({label:c.label, tag:'micro'});
+      S.draining='micro'; S.between=[{label:c.label,cls:'micro'}];
+      return true;
+    }
+    // advance to next phase
+    S.phase++;
+    if(S.phase>5){
+      S.phase=0; S.lap++;
+    }
+    S.mode='enter';
+    if(allEmpty()){ S.done=true; }
+    return true;
+  }
+  return false;
+}
+function emptyElsewhere(){
+  return ['check','close'].every(k=>S.q[k].length===0) && S.tick.length===0 && S.micro.length===0;
+}
+function allEmpty(){
+  return KEYS.every(k=>S.q[k].length===0) && S.tick.length===0 && S.micro.length===0 && S.future.length===0;
+}
+
+/* ---- render ---- */
+function buildNodes(){
+  // arrows around the ring
+  let arr='';
+  for(let i=0;i<6;i++){
+    const a=(-90+i*60+30)*Math.PI/180, r=150, cx=200, cy=200;
+    const x=cx+r*Math.cos(a), y=cy+r*Math.sin(a);
+    const rot=(-90+i*60+30)+90;
+    arr+=`<path d="M-5,-4 L4,0 L-5,4 Z" transform="translate(${x} ${y}) rotate(${rot})"/>`;
+  }
+  $('arrows').innerHTML=arr;
+
+  // phase nodes
+  PHASES.forEach((p,i)=>{
+    const [x,y]=nodeXY(i);
+    const el=document.createElement('div');
+    el.className='node'; el.id='node-'+i;
+    el.style.left=x+'%'; el.style.top=y+'%';
+    el.innerHTML=`<div class="nname">${i+1}. ${p.name}</div><div class="nsub">${p.sub}</div><div class="nq" id="nq-${i}"></div>`;
+    $('ringwrap').appendChild(el);
+  });
+}
+
+let markerAngle=-90, targetAngle=-90, raf=null;
+function positionMarker(){
+  const a=markerAngle*Math.PI/180;
+  const x=50+40*Math.cos(a), y=50+40*Math.sin(a);
+  $('marker').style.left=x+'%'; $('marker').style.top=y+'%';
+  // progress arc
+  const frac=((targetAngle+90)/360)%1;
+  const circ=2*Math.PI*150;
+  $('progress').setAttribute('stroke-dasharray', `${(frac<0?frac+1:frac)*circ} ${circ}`);
+}
+function tweenMarker(){
+  const d=targetAngle-markerAngle;
+  if(Math.abs(d)>0.4){ markerAngle+=d*0.16; positionMarker(); raf=requestAnimationFrame(tweenMarker); }
+  else { markerAngle=targetAngle; positionMarker(); raf=null; }
+}
+function setTarget(){
+  // monotonic angle so it keeps spinning clockwise
+  targetAngle = -90 + ((S.lap-1)*6 + S.phase)*60;
+  if(!raf) raf=requestAnimationFrame(tweenMarker);
+}
+
+function render(){
+  const ph=PHASES[S.phase], key=ph.key;
+
+  // nodes
+  PHASES.forEach((p,i)=>{
+    const el=$('node-'+i); const nq=$('nq-'+i);
+    if(!el||!nq) return;
+    el.classList.toggle('active', i===S.phase && !S.done);
+    el.classList.toggle('passed', false);
+    const items=S.q[p.key];
+    nq.innerHTML = items.length
+      ? items.map(c=>`<span class="qmini">${esc(c.label)}</span>`).join('')
+      : '<span class="qmini empty">·</span>';
+  });
+
+  // marker
+  setTarget();
+  $('marker').classList.toggle('sleeping', S.sleeping);
+
+  // hub
+  $('lapn').textContent=S.lap;
+  $('hub').classList.toggle('draining', !!S.draining);
+  $('hdrain').textContent = S.draining==='tick' ? 'nextTick →' : S.draining==='micro' ? 'microtask →' : '';
+  $('between').innerHTML = S.between.map(b=>`<span class="bchip ${b.cls}">${esc(b.label)}</span>`).join('');
+
+  // detail
+  $('beatn').textContent = 'beat '+S.beat;
+  let extra='';
+  if(S.draining) extra=`<div class="drainrow"><i></i>Between phases: draining the <b>${S.draining==='tick'?'nextTick':'microtask'}</b> queue — this happens after <i>every</i> phase, and is not a phase itself.</div>`;
+  else if(S.sleeping) extra=`<div class="drainrow" style="border-color:var(--dormant);color:var(--ink-2)"><i style="background:var(--dormant)"></i><b>poll is sleeping.</b> Nothing is runnable, but a timer is pending — so the loop blocks here until it comes due, then continues.</div>`;
+  $('detail').innerHTML = S.draining
+    ? `<div class="dphase">between phases</div><h3 style="color:var(--micro)">${S.draining==='tick'?'nextTick queue':'microtask queue'}</h3>${extra}`
+    : `<div class="dphase">phase ${S.phase+1} of 6${S.sleeping?' · blocking':''}</div><h3>${ph.name}</h3><p>${ph.desc}</p>${extra}`;
+
+  // console
+  $('out').innerHTML = S.out.length
+    ? S.out.map((o,n)=>`<div><span class="idx">${n+1}.</span><span>${esc(o.label)}</span><span class="tag ${o.tag}">${o.tag}</span></div>`).join('')
+    : '<div class="ph">no output yet — the loop hasn\'t run anything</div>';
+  $('out').scrollTop=$('out').scrollHeight;
+
+  // badge + note
+  if(S.done){
+    $('badge').textContent='loop exited';
+    $('note').innerHTML='<b>The lap is complete and no referenced handles remain</b> — so libuv exits and the process ends. Reset to run it again.';
+  } else if(S.draining){
+    $('badge').textContent='between phases';
+    $('note').innerHTML='<b>'+(S.draining==='tick'?'nextTick':'microtasks')+'</b> drain between phases — they cut in front of the loop, so they always beat the next phase\'s callbacks.';
+  } else if(S.sleeping){
+    $('badge').textContent='poll · sleeping';
+    $('note').innerHTML='The loop has nothing to run, so it <b>parks in poll</b> and waits — this is where an idle Node process spends its time.';
+  } else {
+    $('badge').textContent='lap '+S.lap+' · '+ph.name;
+    $('note').innerHTML = S.lastFired
+      ? `<b>${esc(S.lastFired)}</b> ran in the <b>${ph.name}</b> phase.`
+      : `Entering the <b>${ph.name}</b> phase.`;
+  }
+
+  $('step').disabled=S.done;
+}
+
+/* ---- controls ---- */
+let timer=null;
+const SPEEDS={1:1600,2:1150,3:820,4:560,5:360};
+function step(){ if(advance()) render(); if(S.done) stop(); }
+function stop(){ clearInterval(timer); timer=null; $('play').textContent='▶ Run'; }
+function play(){
+  if(timer){ stop(); return; }
+  if(S.done) reset();
+  $('play').textContent='❚❚ Pause';
+  timer=setInterval(step, SPEEDS[$('speed').value]);
+}
+function reset(){ stop(); fresh(scenKey); markerAngle=-90; targetAngle=-90; render(); positionMarker(); }
+
+$('scenario').innerHTML=Object.entries(SCEN).map(([k,s])=>`<option value="${k}">${s.name}</option>`).join('');
+$('scenario').onchange=e=>{ scenKey=e.target.value; reset(); };
+$('play').onclick=play;
+$('step').onclick=()=>{ stop(); step(); };
+$('reset').onclick=reset;
+$('speed').oninput=()=>{ if(timer){ stop(); play(); } };
+document.addEventListener('keydown',e=>{
+  if(e.target.tagName==='SELECT'||e.target.tagName==='INPUT') return;
+  if(e.key===' '){ e.preventDefault(); play(); }
+  if(e.key==='ArrowRight'){ e.preventDefault(); stop(); step(); }
+});
+
+buildNodes();
+fresh('tour');
+render();
+positionMarker();
+</script>
+<footer class="site-footer">Built with AI from a prompt by <a href="https://github.com/gsmithun4" target="_blank" rel="noopener noreferrer">gsmithun4</a>.</footer>
+</body>
+</html>

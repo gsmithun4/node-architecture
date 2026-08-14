@@ -1,0 +1,643 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Inside the Poll Phase — libuv</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --paper:#E6E8E3; --panel:#FAFAF8; --panel-2:#F1F2EE;
+    --ink:#191D1E; --ink-2:#5C6461; --ink-3:#8E9591; --rule:#CBD0C8;
+    --uv:#0E6E63; --micro:#6D4AC7; --tick:#B03A3A; --check:#B4740A;
+    --kernel:#B03A3A; --dormant:#9AA29D; --hl:#FFF3C4;
+    --shadow:0 1px 0 rgba(25,29,30,.06), 0 2px 8px rgba(25,29,30,.05);
+    --mono:'IBM Plex Mono',ui-monospace,monospace;
+    --disp:'Space Grotesk',system-ui,sans-serif;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0}
+  body{
+    background:var(--paper);
+    background-image:linear-gradient(var(--rule) 1px,transparent 1px),linear-gradient(90deg,var(--rule) 1px,transparent 1px);
+    background-size:28px 28px; background-position:-1px -1px;
+    color:var(--ink); font-family:var(--disp); -webkit-font-smoothing:antialiased; padding:18px;
+  }
+  .wrap{max-width:1120px;margin:0 auto}
+  header{display:flex;flex-wrap:wrap;gap:16px;align-items:flex-end;justify-content:space-between;
+    padding-bottom:14px;border-bottom:1.5px solid var(--ink)}
+  h1{font-size:clamp(19px,2.4vw,27px);font-weight:700;letter-spacing:-.02em;margin:0;line-height:1.05}
+  h1 em{font-style:normal;color:var(--ink-3)}
+  .sub{font-family:var(--mono);font-size:11px;color:var(--ink-2);margin-top:5px}
+
+  .context{background:var(--ink);color:#EDEEEA;border-radius:2px;padding:9px 13px;margin:14px 0;
+    font-family:var(--mono);font-size:11px;line-height:1.55;display:flex;gap:9px;align-items:center}
+  .context b{color:#fff}
+  .context .ph{display:flex;gap:4px;flex-wrap:wrap}
+  .context .p{padding:2px 6px;border-radius:2px;border:1.5px solid rgba(255,255,255,.25);color:rgba(255,255,255,.6)}
+  .context .p.on{border-color:#fff;background:#fff;color:var(--ink);font-weight:600}
+
+  select,button,input{font-family:var(--mono);font-size:12px;color:var(--ink);background:var(--panel);
+    border:1.5px solid var(--ink);border-radius:2px;padding:7px 11px;cursor:pointer;transition:transform .08s ease,background .12s ease}
+  button:hover:not(:disabled){background:var(--ink);color:var(--panel)}
+  button:active:not(:disabled){transform:translateY(1px)}
+  button:disabled{opacity:.35;cursor:not-allowed}
+  button.primary{background:var(--ink);color:var(--panel)}
+  :focus-visible{outline:2.5px solid var(--micro);outline-offset:2px}
+
+  .tabs{display:flex;margin:14px 0;border-bottom:1.5px solid var(--ink);flex-wrap:wrap}
+  .tab{font-family:var(--mono);font-size:11px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;
+    background:transparent;border:1.5px solid transparent;border-bottom:0;border-radius:2px 2px 0 0;
+    padding:9px 15px;margin-bottom:-1.5px;color:var(--ink-2)}
+  .tab:hover{background:transparent;color:var(--ink)}
+  .tab[aria-selected="true"]{background:var(--panel);border-color:var(--ink);color:var(--ink)}
+  .tab small{display:block;font-size:8.5px;font-weight:400;letter-spacing:.01em;text-transform:none;color:var(--ink-3);margin-top:1px}
+  .tab[aria-selected="true"] small{color:var(--ink-2)}
+
+  .card{background:var(--panel);border:1.5px solid var(--ink);border-radius:2px;box-shadow:var(--shadow);overflow:hidden}
+  .card>h2{font-family:var(--mono);font-size:10.5px;font-weight:600;letter-spacing:.1em;text-transform:uppercase;
+    margin:0;padding:8px 11px;border-bottom:1.5px solid var(--ink);display:flex;justify-content:space-between;gap:8px;align-items:center}
+  .card>h2 span{color:var(--ink-3);font-weight:400;text-transform:none;letter-spacing:.02em;font-size:10px}
+  .body{padding:12px}
+  .grid2{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:14px;align-items:start}
+
+  /* ---- shared bits ---- */
+  .toggle{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:7px 9px;
+    border:1.5px solid var(--rule);border-radius:2px;margin-bottom:6px;cursor:pointer;background:var(--panel-2)}
+  .toggle:hover{border-color:var(--ink-3)}
+  .toggle.on{border-color:var(--uv);background:#fff}
+  .toggle .tlbl{font-family:var(--mono);font-size:11px}
+  .toggle .tlbl small{display:block;color:var(--ink-3);font-size:9px;margin-top:1px}
+  .sw{width:34px;height:19px;border-radius:99px;background:var(--rule);position:relative;flex:0 0 auto;transition:background .15s}
+  .sw::after{content:'';position:absolute;top:2px;left:2px;width:15px;height:15px;border-radius:50%;background:#fff;transition:left .15s;box-shadow:0 1px 2px rgba(0,0,0,.2)}
+  .toggle.on .sw{background:var(--uv)}
+  .toggle.on .sw::after{left:17px}
+
+  .note{font-family:var(--mono);font-size:11px;color:var(--ink-2);line-height:1.55;margin-top:10px;
+    padding:8px 10px;border:1.5px dashed var(--rule);border-radius:2px}
+  .note b{color:var(--ink)}
+  code{font-family:var(--mono);font-size:11px;background:var(--panel-2);border:1px solid var(--rule);border-radius:2px;padding:0 3px}
+
+  /* ---- A: timeout cascade ---- */
+  .readout{text-align:center;padding:16px 10px;border:1.5px solid var(--ink);border-radius:2px;margin-bottom:12px;
+    background:var(--panel-2);transition:all .2s}
+  .readout.zero{background:var(--hl)}
+  .readout.block{background:var(--ink);color:#EDEEEA}
+  .readout .rlbl{font-family:var(--mono);font-size:9.5px;letter-spacing:.1em;text-transform:uppercase;color:var(--ink-3)}
+  .readout.block .rlbl{color:var(--ink-3)}
+  .readout .rval{font-family:var(--disp);font-size:38px;font-weight:700;line-height:1.05;margin:3px 0}
+  .readout .rwhy{font-family:var(--mono);font-size:10.5px;line-height:1.5;max-width:340px;margin:4px auto 0}
+  .zzz{font-family:var(--mono);font-size:13px;letter-spacing:3px;color:var(--dormant);animation:zpulse 1.3s ease-in-out infinite}
+  @keyframes zpulse{0%,100%{opacity:.4}50%{opacity:1}}
+
+  .cascade{display:flex;flex-direction:column;gap:3px;margin-top:10px}
+  .rule{display:flex;align-items:center;gap:8px;font-family:var(--mono);font-size:10.5px;padding:5px 8px;
+    border-radius:2px;border:1.5px solid transparent;color:var(--ink-3)}
+  .rule .rn{width:15px;height:15px;border-radius:50%;border:1.5px solid var(--rule);flex:0 0 auto;
+    display:flex;align-items:center;justify-content:center;font-size:8px}
+  .rule.win{border-color:var(--uv);background:#fff;color:var(--uv);font-weight:600}
+  .rule.win .rn{border-color:var(--uv);color:var(--uv)}
+  .rule.dead{opacity:.4;text-decoration:line-through}
+
+  .timers{display:flex;flex-direction:column;gap:5px;margin-top:8px}
+  .timer{display:flex;align-items:center;gap:8px;font-family:var(--mono);font-size:11px}
+  .timer input[type=range]{flex:1;padding:0;border:0;background:transparent}
+  .timer .tv{width:64px;text-align:right;color:var(--uv);font-weight:600}
+  .timer button{padding:2px 7px;font-size:11px}
+  .addbtn{margin-top:6px;font-size:11px;padding:5px 9px}
+
+  /* ---- B: epoll ---- */
+  .kernel-strip{display:flex;align-items:center;gap:8px;font-family:var(--mono);font-size:10px;color:var(--ink-2);
+    margin-bottom:10px;padding:6px 9px;border:1.5px solid var(--kernel);border-radius:2px;background:rgba(176,58,58,.04)}
+  .kernel-strip b{color:var(--kernel)}
+  .socks{display:grid;grid-template-columns:repeat(auto-fill,minmax(88px,1fr));gap:6px}
+  .sock{border:1.5px solid var(--rule);border-radius:2px;padding:7px 6px;text-align:center;cursor:pointer;
+    font-family:var(--mono);font-size:10px;background:var(--panel-2);transition:all .15s;position:relative}
+  .sock:hover{border-color:var(--ink-3)}
+  .sock .fd{font-weight:600;font-size:11px}
+  .sock .st{font-size:8.5px;color:var(--ink-3);margin-top:2px}
+  .sock.ready{border-color:var(--uv);background:#fff;box-shadow:0 0 0 2px rgba(14,110,99,.15)}
+  .sock.ready .st{color:var(--uv);font-weight:600}
+  .sock.firing{border-color:var(--uv);background:var(--hl);animation:fire .4s ease-out}
+  @keyframes fire{0%{transform:scale(1)}40%{transform:scale(1.1)}100%{transform:scale(1)}}
+  .sock .badge{position:absolute;top:-6px;right:-6px;background:var(--uv);color:#fff;font-size:8px;
+    padding:1px 4px;border-radius:99px;font-weight:600}
+  .scalerow{display:flex;align-items:center;gap:10px;margin:12px 0 4px;font-family:var(--mono);font-size:11px}
+  .scalerow input{flex:1}
+  .stat{display:flex;gap:10px;flex-wrap:wrap;margin-top:10px}
+  .stat .s{flex:1;min-width:120px;border:1.5px solid var(--ink);border-radius:2px;padding:8px 10px;text-align:center;background:var(--panel-2)}
+  .stat .s .sv{font-family:var(--disp);font-size:22px;font-weight:700;line-height:1}
+  .stat .s .sl{font-family:var(--mono);font-size:9px;letter-spacing:.05em;text-transform:uppercase;color:var(--ink-3);margin-top:3px}
+  .stat .s.hot .sv{color:var(--uv)}
+  .stat .s.zero .sv{color:var(--kernel)}
+
+  /* ---- C: poll vs check ---- */
+  pre.code{margin:0;font-family:var(--mono);font-size:12px;line-height:1.7;overflow-x:auto}
+  .ln{display:flex;gap:9px;padding:0 5px;border-radius:2px;white-space:pre}
+  .ln .n{color:var(--ink-3);min-width:15px;text-align:right;font-size:10.5px}
+  .ln.on{background:var(--hl);box-shadow:inset 3px 0 0 var(--ink)}
+  .tok-k{color:#8A2E6B}.tok-s{color:#0E6E63}.tok-f{color:#2B4C9B}.tok-c{color:var(--ink-3);font-style:italic}.tok-n{color:#B4740A}
+  .phstrip{display:flex;flex-direction:column;gap:2px;margin-top:4px}
+  .phrow{display:flex;justify-content:space-between;gap:8px;font-family:var(--mono);font-size:10.5px;
+    padding:4px 8px;border-radius:2px;border:1.5px solid transparent;color:var(--ink-2)}
+  .phrow small{color:var(--ink-3)}
+  .phrow.on{border-color:var(--check);background:#fff;color:var(--check);font-weight:600}
+  .phrow.on small{color:var(--check);opacity:.8}
+  .phrow.done{opacity:.4}
+  .modeseg{display:flex;border:1.5px solid var(--ink);border-radius:2px;overflow:hidden;margin-bottom:10px}
+  .modeseg button{border:0;border-radius:0;flex:1;background:var(--panel)}
+  .modeseg button+button{border-left:1.5px solid var(--ink)}
+  .modeseg button[aria-pressed="true"]{background:var(--ink);color:var(--panel)}
+
+  .out{background:var(--ink);border-radius:2px;padding:9px 10px;min-height:60px;font-family:var(--mono);
+    font-size:11.5px;line-height:1.7;color:#EDEEEA;margin-top:10px}
+  .out div{animation:pop .2s ease-out;display:flex;gap:8px}
+  @keyframes pop{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+  .out .idx{color:var(--dormant)}
+  .out .tag{margin-left:auto;font-size:9px;opacity:.85}
+  .out .tag.check{color:#E0B15A}.out .tag.timers{color:#7FD1C7}.out .tag.poll{color:#7FD1C7}
+  .out .ph{color:var(--ink-3)}
+  .verdict{border:1.5px solid var(--ink);background:var(--hl);border-radius:2px;padding:9px 11px;margin-top:10px;
+    font-size:12.5px;line-height:1.5}
+  .verdict b{font-weight:600}
+
+  .legend{display:flex;gap:14px;flex-wrap:wrap;margin-top:14px;padding-top:10px;border-top:1.5px solid var(--ink);
+    font-family:var(--mono);font-size:10.5px;color:var(--ink-2)}
+  .legend span{display:flex;align-items:center;gap:5px}
+  .dot{width:9px;height:9px;border-radius:50%;flex:0 0 auto}
+
+
+  /* ---- condition info ---- */
+  .info{width:17px;height:17px;flex:0 0 auto;border-radius:50%;border:1.5px solid var(--ink-3);
+    background:transparent;color:var(--ink-3);font-family:var(--mono);font-size:10px;font-weight:700;
+    display:inline-flex;align-items:center;justify-content:center;cursor:pointer;padding:0;margin:0 8px}
+  .info:hover,.info[aria-expanded="true"]{background:var(--uv);border-color:var(--uv);color:#fff}
+  .pop-back{position:fixed;inset:0;background:rgba(25,29,30,.34);z-index:60;display:flex;align-items:center;
+    justify-content:center;padding:20px;animation:fade .14s ease-out}
+  @keyframes fade{from{opacity:0}to{opacity:1}}
+  .pop{background:var(--panel);border:1.5px solid var(--ink);border-radius:2px;max-width:560px;width:100%;
+    max-height:86vh;overflow:auto;box-shadow:0 12px 40px rgba(25,29,30,.3);animation:rise .18s ease-out}
+  @keyframes rise{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
+  .pop-h{display:flex;align-items:center;gap:10px;padding:12px 14px;border-bottom:1.5px solid var(--ink);
+    position:sticky;top:0;background:var(--panel)}
+  .pop-h h3{margin:0;font-family:var(--mono);font-size:15px;font-weight:700}
+  .pop-h .rulepill{font-family:var(--mono);font-size:9px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;
+    padding:3px 8px;border-radius:999px;color:#fff;background:var(--uv)}
+  .pop-h button{margin-left:auto;border:1.5px solid var(--ink);background:var(--panel);border-radius:2px;
+    font-family:var(--mono);font-size:11px;padding:4px 9px;cursor:pointer}
+  .pop-h button:hover{background:var(--ink);color:var(--panel)}
+  .pop-b{padding:13px 15px}
+  .pop-b h4{font-family:var(--mono);font-size:9.5px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;
+    color:var(--ink-2);margin:14px 0 5px}
+  .pop-b h4:first-child{margin-top:0}
+  .pop-b p{margin:0 0 8px;font-size:13px;line-height:1.6}
+  .pop-b p b{font-weight:600}
+  .pop-b .ex{border:1.5px solid var(--rule);border-radius:2px;background:var(--panel-2);padding:9px 11px;
+    font-family:var(--mono);font-size:11px;line-height:1.6;white-space:pre-wrap;margin:4px 0 8px}
+  .pop-b .warn{border:1.5px solid var(--check);border-radius:2px;background:rgba(180,116,10,.06);padding:8px 11px;margin-top:8px}
+  .pop-b .warn b{font-family:var(--mono);font-size:9px;letter-spacing:.06em;text-transform:uppercase;color:var(--check);display:block;margin-bottom:3px}
+  .pop-b .warn p{margin:0;font-size:12.5px}
+
+  .site-footer{
+    margin-top:16px;
+    padding-top:10px;
+    border-top:1.5px solid var(--ink);
+    font-family:var(--mono);
+    font-size:10.5px;
+    color:var(--ink-2);
+  }
+  .site-footer a{color:var(--ink);text-decoration-thickness:1.5px}
+
+  [hidden]{display:none!important}
+  @media (max-width:820px){ .grid2{grid-template-columns:1fr} }
+  @media (prefers-reduced-motion:reduce){ *{animation:none!important;transition:none!important} }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div>
+      <h1>Inside the Poll Phase <em>— libuv</em></h1>
+      <div class="sub">the one phase that sleeps · how long it blocks · how it wakes · why setImmediate wins</div>
+    </div>
+  </header>
+
+  <div class="context">
+    <span>you are here:</span>
+    <span class="ph">
+      <span class="p">timers</span><span class="p">pending</span><span class="p">idle</span>
+      <span class="p on">poll</span><span class="p">check</span><span class="p">close</span>
+    </span>
+    <span style="margin-left:auto;color:var(--ink-3)">the loop spends almost all its idle time right here</span>
+  </div>
+
+  <div class="tabs" role="tablist">
+    <button class="tab" id="tab-a" role="tab" aria-selected="true">Timeout<small>how long to block</small></button>
+    <button class="tab" id="tab-b" role="tab" aria-selected="false">I/O readiness<small>sockets → epoll → callbacks</small></button>
+    <button class="tab" id="tab-c" role="tab" aria-selected="false">Poll vs check<small>why setImmediate wins</small></button>
+  </div>
+
+  <!-- ============ A: TIMEOUT ============ -->
+  <div id="view-a">
+    <div class="grid2">
+      <section class="card">
+        <h2>Loop conditions <span>toggle to see the effect</span></h2>
+        <div class="body">
+          <div class="toggle on" id="tg-alive" data-k="alive">
+            <div class="tlbl">Referenced handles active<small>is the loop still alive?</small></div><button class="info" data-info="alive">i</button><div class="sw"></div></div>
+          <div class="toggle" id="tg-imm" data-k="immediates">
+            <div class="tlbl">setImmediate callbacks pending<small>anything waiting for the check phase?</small></div><button class="info" data-info="immediates">i</button><div class="sw"></div></div>
+          <div class="toggle" id="tg-idle" data-k="idle">
+            <div class="tlbl">Idle handle active<small>uv_idle running?</small></div><button class="info" data-info="idle">i</button><div class="sw"></div></div>
+          <div class="toggle" id="tg-close" data-k="closing">
+            <div class="tlbl">Closing handles pending<small>sockets being torn down?</small></div><button class="info" data-info="closing">i</button><div class="sw"></div></div>
+
+          <div style="font-family:var(--mono);font-size:9.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--ink-3);margin:12px 0 4px">Pending timers (due in…)</div>
+          <div class="timers" id="timers"></div>
+          <button class="addbtn" id="addtimer">+ add a timer</button>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>What poll decides <span>uv_backend_timeout()</span></h2>
+        <div class="body">
+          <div class="readout" id="readout"></div>
+          <div class="cascade" id="cascade"></div>
+          <div class="note" id="a-note"></div>
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <!-- ============ B: I/O READINESS ============ -->
+  <div id="view-b" hidden>
+    <div class="grid2">
+      <section class="card">
+        <h2>Watched sockets <span>click one to make data arrive</span></h2>
+        <div class="body">
+          <div class="kernel-strip"><b>epoll_wait()</b> — one call watches every fd below, on the main thread. The kernel returns only the ready ones.</div>
+          <div class="socks" id="socks"></div>
+          <div class="scalerow">
+            <span>how many connections?</span>
+            <input type="range" id="scale" min="6" max="10000" value="6">
+            <span class="tv" id="scale-v" style="width:64px;text-align:right;font-family:var(--mono);color:var(--uv);font-weight:600">6</span>
+          </div>
+          <div class="stat" id="stat"></div>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>The poll wakes <span>epoll_wait returns</span></h2>
+        <div class="body">
+          <button id="runpoll" class="primary" style="width:100%">Wake the poll — call epoll_wait() ▶</button>
+          <div class="note" id="b-note" style="margin-top:12px"></div>
+          <div class="out" id="b-out"></div>
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <!-- ============ C: POLL VS CHECK ============ -->
+  <div id="view-c" hidden>
+    <div class="grid2">
+      <section class="card">
+        <h2>Where are you scheduling from?</h2>
+        <div class="body">
+          <div class="modeseg" role="group">
+            <button id="mode-io" aria-pressed="true">inside an I/O callback</button>
+            <button id="mode-top" aria-pressed="false">at the top level</button>
+          </div>
+          <pre class="code" id="c-code"></pre>
+          <div class="verdict" id="c-verdict"></div>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>The loop from here <span id="c-lap"></span></h2>
+        <div class="body">
+          <div class="phstrip" id="c-phases"></div>
+          <div style="display:flex;gap:8px;margin-top:10px">
+            <button id="c-step" class="primary">Step →</button>
+            <button id="c-run">Run</button>
+            <button id="c-reset">Reset</button>
+          </div>
+          <div class="out" id="c-out"></div>
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <div class="legend">
+    <span><i class="dot" style="background:var(--uv)"></i>poll · I/O</span>
+    <span><i class="dot" style="background:var(--check)"></i>check · setImmediate</span>
+    <span><i class="dot" style="background:var(--dormant)"></i>blocking / sleeping</span>
+    <span><i class="dot" style="background:var(--kernel)"></i>kernel</span>
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+
+/* ============================================================
+   A — the timeout calculation (a faithful model of
+   uv_backend_timeout() + uv__next_timeout())
+   ============================================================ */
+const A = { alive:true, immediates:false, idle:false, closing:false, timers:[8] };
+
+function backendTimeout(s){
+  if(!s.alive)      return {ms:0,  rule:'exit',    why:'No referenced handles remain — the loop is about to exit, so blocking would just delay that. Return <b>0</b>.'};
+  if(s.idle)        return {ms:0,  rule:'idle',    why:'An idle handle is active. The loop is meant to keep spinning, so poll must not sleep. Return <b>0</b>.'};
+  if(s.closing)     return {ms:0,  rule:'closing', why:'Handles are pending close — their callbacks need to run this iteration. Do not block. Return <b>0</b>.'};
+  if(s.immediates)  return {ms:0,  rule:'immed',   why:'<code>setImmediate</code> callbacks are queued for the <b>check</b> phase. The loop must get there right away, so poll returns <b>0</b> and does not block.'};
+  if(s.timers.length){
+    const next=Math.min(...s.timers);
+    const ms=Math.max(0,next);
+    return {ms, rule:'timer', why: ms===0
+      ? 'A timer is already <b>overdue</b> — block for <b>0ms</b> so the next timers phase runs it immediately.'
+      : `The nearest timer is due in <b>${ms}ms</b>. Block <code>epoll_wait</code> for <b>exactly that long</b> — wake early if a socket becomes ready, otherwise wake to run the timer.`};
+  }
+  return {ms:-1, rule:'block', why:'No timers, no immediates, nothing closing. Block <b>indefinitely</b> — sleep until a watched socket becomes ready (or a signal arrives). This is where an idle server rests.'};
+}
+
+const A_RULES = [
+  ['exit',   'loop not alive → 0'],
+  ['idle',   'idle handle active → 0'],
+  ['closing','closing handles → 0'],
+  ['immed',  'setImmediate pending → 0'],
+  ['timer',  'timers pending → time until nearest'],
+  ['block',  'otherwise → block until an fd is ready']
+];
+
+function renderA(){
+  const r = backendTimeout(A);
+  const ro = $('readout');
+  ro.className = 'readout ' + (r.ms===0 ? 'zero' : r.ms<0 ? 'block' : '');
+  const val = r.ms<0 ? '∞' : r.ms===0 ? '0<small style="font-size:16px"> ms</small>' : r.ms+'<small style="font-size:16px"> ms</small>';
+  ro.innerHTML = `<div class="rlbl">poll will block for</div>
+    <div class="rval">${val}</div>
+    ${r.ms!==0 ? '<div class="zzz">z &nbsp; z &nbsp; z</div>' : '<div class="rlbl" style="color:var(--uv)">⚡ does not block</div>'}
+    <div class="rwhy">${r.why}</div>`;
+
+  const winIdx = A_RULES.findIndex(x=>x[0]===r.rule);
+  $('cascade').innerHTML = A_RULES.map(([k,txt],i)=>{
+    const cls = i===winIdx ? 'win' : i>winIdx ? 'dead' : '';
+    return `<div class="rule ${cls}"><span class="rn">${i+1}</span><span>${txt}</span>${i===winIdx?'<span style="margin-left:auto">← wins</span>':''}</div>`;
+  }).join('');
+
+  $('a-note').innerHTML = 'This cascade is checked <b>top to bottom</b>; the first matching rule decides the block time. It mirrors libuv\'s <code>uv_backend_timeout()</code> — the reason an idle Node process uses ~0% CPU is that it ends up on the last rule and simply sleeps in <code>epoll_wait</code> until the kernel wakes it.';
+
+  // toggles + timers
+  [['alive','tg-alive'],['immediates','tg-imm'],['idle','tg-idle'],['closing','tg-close']].forEach(([k,id])=>
+    $(id).classList.toggle('on', A[k]));
+  $('timers').innerHTML = A.timers.length
+    ? A.timers.map((t,i)=>`<div class="timer">
+        <span style="width:20px">#${i+1}</span>
+        <input type="range" min="0" max="200" value="${t}" data-i="${i}">
+        <span class="tv">+${t} ms</span>
+        <button data-del="${i}">✕</button></div>`).join('')
+    : '<div style="font-family:var(--mono);font-size:10.5px;color:var(--ink-3);padding:4px">no timers pending</div>';
+  $('timers').querySelectorAll('input[data-i]').forEach(inp=>inp.oninput=()=>{
+    A.timers[+inp.dataset.i]=+inp.value; renderA();
+  });
+  $('timers').querySelectorAll('button[data-del]').forEach(b=>b.onclick=()=>{
+    A.timers.splice(+b.dataset.del,1); renderA();
+  });
+}
+document.querySelectorAll('#view-a .toggle').forEach(t=>t.onclick=()=>{ A[t.dataset.k]=!A[t.dataset.k]; renderA(); });
+$('addtimer').onclick=()=>{ if(A.timers.length<4){ A.timers.push(20); renderA(); } };
+
+
+/* ---- condition explanations ---- */
+const COND_INFO = {
+  alive:{
+    title:'Referenced handles active',
+    rule:'rule 1 · loop not alive → 0',
+    body:[
+      ['What it means',
+       'The event loop keeps running only while it has at least one <b>referenced</b> handle or active request — an open server, a pending timer, a connected socket, a watched file descriptor. When the count of referenced handles drops to zero, the loop has nothing left to wait for.'],
+      ['Why it forces the timeout to 0',
+       'If nothing is referenced, the loop is <b>about to exit</b>. Blocking in <code>epoll_wait</code> would just delay that exit for no reason — there is nothing that could wake it. So <code>uv_backend_timeout</code> returns <b>0</b>, the loop finishes its lap, sees no work, and the process ends.'],
+      ['This is what makes scripts exit',
+       'A script with no pending async work exits the moment its top-level code finishes. A server stays up because <code>server.listen()</code> creates a <b>referenced</b> handle that keeps the count above zero:'],
+    ],
+    ex:"// exits immediately — nothing referenced\nconsole.log('done');\n\n// runs forever — the server handle is referenced\nrequire('http').createServer().listen(3000);",
+    warn:['ref vs unref','<code>.unref()</code> marks a handle as <b>not</b> keeping the loop alive. <code>setTimeout(fn, 1000).unref()</code> still fires <i>if</i> the loop is running, but won\'t hold the process open by itself. That\'s how you write background timers that don\'t block a clean exit.']
+  },
+  immediates:{
+    title:'setImmediate callbacks pending',
+    rule:'rule 4 · setImmediate pending → 0',
+    body:[
+      ['What it means',
+       '<code>setImmediate(fn)</code> queues <code>fn</code> for the <b>check</b> phase — the phase that comes immediately after poll. If any immediates are waiting, there is guaranteed work to do the moment poll ends.'],
+      ['Why it forces the timeout to 0',
+       'If poll blocked while immediates were pending, it would <b>delay</b> callbacks that are supposed to run this very iteration. So when the immediate queue is non-empty, poll must not sleep — it returns <b>0</b>, falls straight through to check, and runs them.'],
+      ['The ordering guarantee this creates',
+       'Because check sits right after poll and poll won\'t block when immediates are queued, an immediate scheduled from inside an I/O callback <b>always</b> runs before a <code>setTimeout(fn, 0)</code> scheduled alongside it. (See the "Poll vs check" tab.)'],
+    ],
+    ex:"// recursive setImmediate keeps the loop spinning\n// at 0-timeout, but still yields to I/O each lap —\n// unlike a while-loop, it does NOT starve the server\nfunction tick() { setImmediate(tick); }",
+    warn:['Under the hood','Node keeps an internal handle active while immediates are queued, which is what actually drives the timeout to 0. Conceptually, though, the rule is simply: <b>immediates pending → don\'t block</b>.']
+  },
+  idle:{
+    title:'Idle handle active',
+    rule:'rule 2 · idle handle active → 0',
+    body:[
+      ['What it means',
+       'A <code>uv_idle_t</code> is a libuv handle whose callback runs on <b>every loop iteration</b>, as long as the loop isn\'t blocking. There is no public <code>setIdle()</code> in Node — this is a low-level libuv primitive that Node uses internally.'],
+      ['Why it forces the timeout to 0',
+       'An active idle handle means "there is something to run on every tick." If poll slept, those per-tick callbacks would stop firing. So an active idle handle keeps the loop <b>spinning at full speed</b> — timeout 0, never sleeping.'],
+      ['Don\'t confuse the two meanings of "idle"',
+       'This is the trap. An <b>idle handle</b> being active makes the loop <i>never</i> sleep. The loop being <b>idle</b> (nothing to do) makes it sleep as long as possible. Same word, opposite effect. The handle is named for <i>when</i> its callback runs (the idle/prepare part of the cycle), not for the loop resting.'],
+    ],
+    ex:"// libuv, not Node's public API:\n// uv_idle_start(&handle, cb)\n// cb runs every iteration; loop never blocks\n// while it's active — burns CPU, use sparingly",
+    warn:['Rarely seen directly','Most Node developers never touch idle handles. It appears here because it\'s one of the real conditions in <code>uv_backend_timeout</code>, and because Node uses idle/prepare handles internally to implement things like the non-blocking behaviour of setImmediate.']
+  },
+  closing:{
+    title:'Closing handles pending',
+    rule:'rule 3 · closing handles → 0',
+    body:[
+      ['What it means',
+       'When you close a handle — <code>socket.destroy()</code>, <code>server.close()</code>, <code>clearTimeout</code> on an active timer — libuv doesn\'t run the close callback immediately. It adds the handle to <code>loop->closing_handles</code>, and the <b>close</b> phase runs the callbacks at the end of the current iteration.'],
+      ['Why it forces the timeout to 0',
+       'Those close callbacks are meant to run <b>this iteration</b>, in the close phase. If poll blocked, it would delay the loop from reaching close. So while any handle is pending close, poll returns <b>0</b> and does not sleep.'],
+      ['Where you see it',
+       'Any <code>\'close\'</code> event goes through this path. After you destroy a socket, its close callback is queued and the loop won\'t sleep until it has run:'],
+    ],
+    ex:"socket.on('close', () => {\n  console.log('cleaned up');  // runs in the close phase\n});\nsocket.destroy();  // queues the close — poll won't block now",
+    warn:['Deferred on purpose','Closing is deferred so that callbacks pending from the <i>same</i> iteration finish first. It keeps teardown ordering predictable — the handle is fully out of every other queue before its close callback fires.']
+  }
+};
+
+function openCond(key, btn){
+  closeCond();
+  const d = COND_INFO[key]; if(!d) return;
+  if(btn) btn.setAttribute('aria-expanded','true');
+  const back=document.createElement('div');
+  back.className='pop-back';
+  back.innerHTML = `<div class="pop" role="dialog" aria-modal="true" aria-label="${esc(d.title)}">
+    <div class="pop-h">
+      <span class="rulepill">${d.rule}</span>
+      <h3>${esc(d.title)}</h3>
+      <button data-close>close ✕</button>
+    </div>
+    <div class="pop-b">
+      ${d.body.map(([h,p])=>`<h4>${h}</h4><p>${p}</p>`).join('')}
+      ${d.ex ? `<div class="ex">${esc(d.ex)}</div>` : ''}
+      ${d.warn ? `<div class="warn"><b>${d.warn[0]}</b><p>${d.warn[1]}</p></div>` : ''}
+    </div></div>`;
+  back.addEventListener('click', e=>{ if(e.target===back||e.target.hasAttribute('data-close')) closeCond(); });
+  document.body.appendChild(back);
+}
+function closeCond(){
+  document.querySelectorAll('.pop-back').forEach(el=>el.remove());
+  document.querySelectorAll('#view-a .info').forEach(b=>b.setAttribute('aria-expanded','false'));
+}
+document.querySelectorAll('#view-a .info').forEach(b=>b.addEventListener('click', e=>{
+  e.stopPropagation();               // don't toggle the switch
+  openCond(b.dataset.info, b);
+}));
+document.addEventListener('keydown', e=>{ if(e.key==='Escape') closeCond(); });
+
+/* ============================================================
+   B — I/O readiness (epoll)
+   ============================================================ */
+const B = { socks:[], scale:6, firing:[] };
+function seedSocks(){
+  B.socks = Array.from({length:6}, (_,i)=>({fd:3+i, ready:false}));
+}
+function renderB(){
+  $('socks').innerHTML = B.socks.map((s,i)=>`
+    <div class="sock ${s.ready?'ready':''} ${B.firing.includes(i)?'firing':''}" data-i="${i}">
+      ${s.ready?'<span class="badge">data</span>':''}
+      <div class="fd">fd ${s.fd}</div>
+      <div class="st">${s.ready?'ready ✓':'watching'}</div>
+    </div>`).join('');
+  $('socks').querySelectorAll('.sock').forEach(el=>el.onclick=()=>{
+    const i=+el.dataset.i; B.socks[i].ready=!B.socks[i].ready; renderB();
+  });
+
+  const ready = B.socks.filter(s=>s.ready).length;
+  const total = B.scale;
+  $('scale-v').textContent = total.toLocaleString();
+  $('stat').innerHTML = `
+    <div class="s hot"><div class="sv">${total.toLocaleString()}</div><div class="sl">sockets watched</div></div>
+    <div class="s"><div class="sv">1</div><div class="sl">epoll_wait call</div></div>
+    <div class="s zero"><div class="sv">0</div><div class="sl">threads used</div></div>`;
+
+  $('b-note').innerHTML = ready
+    ? `<b>${ready}</b> socket${ready>1?'s have':' has'} data ready. Press the button — <code>epoll_wait</code> returns just those, and libuv runs their callbacks <b>one after another on the main thread</b>.`
+    : 'All sockets are <b>watching</b> and nothing has arrived, so <code>epoll_wait</code> is <b>blocked</b> right now (see the Timeout tab for how long). Click a socket to simulate a packet arriving.';
+}
+$('runpoll').onclick=()=>{
+  const ready = B.socks.map((s,i)=>s.ready?i:-1).filter(i=>i>=0);
+  const out=$('b-out');
+  if(!ready.length){ out.innerHTML='<div class="ph">epoll_wait() returned nothing — still blocked. Make a socket ready first.</div>'; return; }
+  B.firing=ready; renderB();
+  out.innerHTML = `<div class="ph">epoll_wait() → ${ready.length} ready fd${ready.length>1?'s':''}, run in order:</div>`;
+  ready.forEach((i,n)=>{
+    out.innerHTML += `<div><span class="idx">${n+1}.</span><span>fd ${B.socks[i].fd} callback</span><span class="tag poll">poll</span></div>`;
+  });
+  setTimeout(()=>{ ready.forEach(i=>B.socks[i].ready=false); B.firing=[]; renderB(); }, 700);
+};
+$('scale').oninput=()=>{ B.scale=+$('scale').value; renderB(); };
+
+/* ============================================================
+   C — poll vs check
+   ============================================================ */
+const C_PHASES = [
+  ['timers','setTimeout(0) lands here — next lap'],
+  ['poll','you are running an I/O callback here'],
+  ['check','setImmediate lands here — this lap']
+];
+let cMode='io', cSteps=[], ci=0, cTimer=null;
+
+function buildC(){
+  if(cMode==='io'){
+    cSteps=[
+      {ph:'poll', line:2, log:['connection'], sched:true, note:'The <b>connection</b> callback runs in the <b>poll</b> phase. Both schedulers below fire from right here.'},
+      {ph:'poll', line:3, note:'<code>setTimeout(…, 0)</code> → goes to the <b>timers</b> queue. But timers already ran this lap — it must wait for the <b>next</b> one.'},
+      {ph:'poll', line:4, note:'<code>setImmediate</code> → goes to the <b>check</b> queue, which is the <i>very next phase</i>.'},
+      {ph:'check', line:4, log:['immediate'], note:'Poll ends → <b>check</b> is next. <b>immediate runs now</b>, still on this lap.'},
+      {ph:'timers', line:3, log:['timeout'], lap:2, note:'The loop wraps to lap 2. Only now does <b>timers</b> run the <code>setTimeout</code>.'}
+    ];
+  } else {
+    cSteps=[
+      {ph:'timers', line:2, note:'At the top level, the loop <b>starts at timers</b>. Whether the 0ms timer is due yet depends on how long startup took…'},
+      {ph:'timers', line:2, note:'…if ~1ms has already elapsed, <b>timeout runs here</b> and wins. If not, timers is empty and the loop moves on.', fork:true},
+      {ph:'check', line:3, log:['? immediate or timeout ?'], note:'Because the winner depends on sub-millisecond startup timing, the order is <b>not guaranteed</b>. Both orderings are legal.'}
+    ];
+  }
+  ci=0; cRender();
+}
+function cRender(){
+  const s=cSteps[ci];
+  $('c-code').innerHTML = (cMode==='io'
+    ? ["server.on('connection', () => {","","  setTimeout(() => log('timeout'), 0);","  setImmediate(() => log('immediate'));","});"]
+    : ["// scheduled at the top level:","","setTimeout(() => log('timeout'), 0);","setImmediate(() => log('immediate'));"]
+  ).map((l,n)=>`<div class="ln ${s && s.line===n+1?'on':''}"><span class="n">${n+1}</span><span>${hlC(l)}</span></div>`).join('');
+
+  const lap = s && s.lap ? s.lap : 1;
+  $('c-lap').textContent = cMode==='io' ? ('lap '+lap) : 'top level';
+  const activeIdx = C_PHASES.findIndex(p=>p[0]===(s?s.ph:''));
+  $('c-phases').innerHTML = C_PHASES.map((p,i)=>
+    `<div class="phrow ${i===activeIdx?'on':''}"><span>${p[0]}</span><small>${p[1]}</small></div>`).join('');
+
+  // accumulate console
+  const logs=[];
+  for(let k=0;k<=ci;k++){ (cSteps[k].log||[]).forEach(l=>logs.push({l,ph:cSteps[k].ph})); }
+  $('c-out').innerHTML = logs.length
+    ? logs.map((o,n)=>`<div><span class="idx">${n+1}.</span><span>${esc(o.l)}</span><span class="tag ${o.ph}">${o.ph}</span></div>`).join('')
+    : '<div class="ph">step through to see the order</div>';
+
+  $('c-verdict').innerHTML = cMode==='io'
+    ? '<b>Guaranteed order: connection → immediate → timeout.</b> Scheduling from inside an I/O callback means you\'re in <b>poll</b>, and <b>check sits right after poll</b> — so setImmediate always beats setTimeout(0) here.'
+    : '<b>No guaranteed order.</b> At the top level, setTimeout(0) vs setImmediate is a coin flip decided by sub-millisecond startup timing. Never rely on it — <i>unless</i> you schedule from inside an I/O callback (switch tabs).';
+
+  $('c-out').insertAdjacentHTML('beforebegin','');
+  const noteEl = $('c-note') || (()=>{ const d=document.createElement('div'); d.className='note'; d.id='c-note'; d.style.marginTop='10px'; $('c-out').after(d); return d; })();
+  noteEl.innerHTML = s ? s.note : '';
+
+  $('c-step').disabled = ci>=cSteps.length-1;
+}
+function hlC(src){
+  return esc(src)
+    .replace(/(\/\/.*$)/g,'<span class="tok-c">$1</span>')
+    .replace(/('[^']*')/g,'<span class="tok-s">$1</span>')
+    .replace(/\b(setTimeout|setImmediate|log|on)\b/g,'<span class="tok-f">$1</span>')
+    .replace(/\b(\d+)\b/g,'<span class="tok-n">$1</span>');
+}
+function cStop(){ clearInterval(cTimer); cTimer=null; $('c-run').textContent='Run'; }
+$('c-step').onclick=()=>{ cStop(); if(ci<cSteps.length-1){ ci++; cRender(); } };
+$('c-run').onclick=()=>{
+  if(cTimer){ cStop(); return; }
+  if(ci>=cSteps.length-1) ci=0;
+  $('c-run').textContent='Pause';
+  cTimer=setInterval(()=>{ if(ci>=cSteps.length-1) cStop(); else { ci++; cRender(); } }, 1400);
+};
+$('c-reset').onclick=()=>{ cStop(); ci=0; cRender(); };
+$('mode-io').onclick=()=>{ cMode='io'; cStop(); $('mode-io').setAttribute('aria-pressed','true'); $('mode-top').setAttribute('aria-pressed','false'); buildC(); };
+$('mode-top').onclick=()=>{ cMode='top'; cStop(); $('mode-top').setAttribute('aria-pressed','true'); $('mode-io').setAttribute('aria-pressed','false'); buildC(); };
+
+/* ============================================================
+   Tabs
+   ============================================================ */
+function setTab(t){
+  ['a','b','c'].forEach(k=>{
+    $('tab-'+k).setAttribute('aria-selected', k===t);
+    $('view-'+k).hidden = k!==t;
+  });
+  cStop();
+}
+$('tab-a').onclick=()=>setTab('a');
+$('tab-b').onclick=()=>setTab('b');
+$('tab-c').onclick=()=>setTab('c');
+
+renderA();
+seedSocks(); renderB();
+buildC();
+</script>
+<footer class="site-footer">Built with AI from a prompt by <a href="https://github.com/gsmithun4" target="_blank" rel="noopener noreferrer">gsmithun4</a>.</footer>
+</body>
+</html>
