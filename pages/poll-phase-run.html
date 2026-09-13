@@ -830,6 +830,26 @@ function seedMicroStarve(){
       'turns on whether the first lap begins before 1 ms has elapsed. The ordering is only <i>guaranteed</i> when ' +
       'both are scheduled from inside an I/O callback.'};
 }
+function seedTickStarve(){
+  // Same stranded work as the microtask preset...
+  submit(op("fs.readFile('data.json')", 'pool', 10, {}));
+  S.check.push({id:++seq, label:'setImmediate #1', sch:freshSch()});
+  S.timers.push({id:++seq, label:'setTimeout 0ms', due:1, sch:freshSch()});
+  // ...plus a promise that is ALREADY resolved and waiting its turn.
+  S.micro.push({id:++seq, label:'promise .then (already resolved)'});
+  // The chain. Node's own queue, drained ahead of V8's.
+  S.tick.push({id:++seq, label:'nextTick #1', refill:12, gen:1});
+
+  S.seedNote = {h:'nextTick starvation · worse than the promise kind',
+    t:'The same stranded work as the microtask preset — a due timer, a queued immediate, a finished file read — ' +
+      'and <b>one extra thing: a promise that is already resolved</b>, sitting in V8’s microtask queue waiting its ' +
+      'turn. Now start stepping. The clock stays at <b>0</b> and the lap counter never reaches <b>1</b>, exactly as ' +
+      'before. But watch the <b>microtask queue</b> in panel 4: that resolved promise <b>never runs either</b>. ' +
+      '<code>process.nextTick</code> is Node’s own queue and it is drained <i>to exhaustion</i> before Node even ' +
+      'asks V8 to empty its microtask queue — so a runaway tick chain starves promises as well as the loop. ' +
+      'That is what makes it the more dangerous of the two: a self-queueing promise at least lets other microtasks ' +
+      'interleave, and this does not let them run at all. Stops after 12; a real one does not stop.'};
+}
 function seedServer(){
   const o = op('server.listen(3000)', 'kernel', 1, {immediate:false});
   o.done = Infinity;              // a listening handle never completes
@@ -843,6 +863,7 @@ const PRESETS = [
   ['One batch, 4 cbs', seedBatch],
   ['Pool starvation',  seedStarve],
   ['Microtask starvation', seedMicroStarve],
+  ['nextTick starvation', seedTickStarve],
   ['Server at rest',   seedServer]
 ];
 
