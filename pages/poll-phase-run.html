@@ -933,7 +933,15 @@ function seedTickStarve(){
       '<code>process.nextTick</code> is Node’s own queue and it is drained <i>to exhaustion</i> before Node even ' +
       'asks V8 to empty its microtask queue — so a runaway tick chain starves promises as well as the loop. ' +
       'That is what makes it the more dangerous of the two: a self-queueing promise at least lets other microtasks ' +
-      'interleave, and this does not let them run at all. Stops after 12; a real one does not stop.'};
+      'interleave, and this does not let them run at all. ' +
+      '<b>And as with promises, there is no <code>setTimeout</code> equivalent of this:</b> the tick queue is ' +
+      're-checked with <b>no clock involved</b>, so a job that queues its own successor is simply found again on ' +
+      'the next look, forever. Timer deadlines are compared against <code>loop-&gt;time</code>, which libuv ' +
+      '<b>freezes at the top of the lap</b> \u2014 a timer created now gets <code>frozen + 1</code> at the earliest, ' +
+      'and <code>frozen + 1 &gt; frozen</code> is always true, so it is <b>arithmetically undue</b> on the lap that ' +
+      'created it. The timers phase therefore has to terminate; this drain has no such guarantee. Full derivation ' +
+      'in <b>the reference card at the bottom of the page</b>. ' +
+      'Stops after 12; a real one does not stop.'};
 }
 function seedWake(){
   // A resting server: nothing due, so poll blocks with no timeout at all.
