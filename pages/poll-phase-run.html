@@ -176,6 +176,30 @@
 
   .ph-empty{font-family:var(--mono);font-size:10.5px;color:var(--ink-3);font-style:italic;padding:6px 2px}
 
+  /* ---------- the thread pool ---------- */
+  .poolstrip{border:1.5px solid var(--pool);border-radius:2px;margin-bottom:9px;overflow:hidden}
+  .poolstrip .ph-h{display:flex;gap:8px;align-items:center;padding:5px 9px;background:rgba(194,87,30,.06);
+    border-bottom:1.5px solid var(--pool);font-family:var(--mono);font-size:9.5px;color:var(--pool)}
+  .poolstrip .ph-h b{font-weight:600;letter-spacing:.06em;text-transform:uppercase;font-size:9px}
+  .poolstrip .ph-h .q{margin-left:auto;color:var(--tick);font-weight:600}
+  .slots{display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:5px;padding:7px 9px}
+  .slot{border:1.5px solid var(--rule);border-radius:2px;padding:5px 7px;background:var(--panel-2);
+    font-family:var(--mono);font-size:9.5px;min-width:0}
+  .slot .tid{font-size:8px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-3)}
+  .slot .job{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:1px}
+  .slot.busy{border-color:var(--pool);background:#fff}
+  .slot.busy .tid{color:var(--pool)}
+  .slot.busy .job{color:var(--pool);font-weight:600}
+  .slot.idle .job{color:var(--ink-3);font-style:italic}
+  .op.q{opacity:.72;border-style:dashed}
+  .op.q .op-h .rm{color:var(--tick)}
+
+  .poolsize{display:flex;gap:6px;align-items:center;margin-top:8px;padding-top:8px;
+    border-top:1px dotted var(--rule);font-family:var(--mono);font-size:10.5px;color:var(--ink-2);flex-wrap:wrap}
+  .poolsize input{width:58px;padding:3px 6px;font-size:10.5px}
+  .poolsize button{padding:4px 9px;font-size:10px}
+  .poolsize .gap{flex:1}
+
   /* ---------- schedule-directly rows ---------- */
   .q-add{display:flex;gap:6px;align-items:center;padding:7px 9px;border-top:1.5px dashed var(--rule);
     background:var(--panel-2);font-family:var(--mono);font-size:10.5px;flex-wrap:wrap}
@@ -363,6 +387,7 @@
       <div class="card">
         <h2>2 · In flight — started, not finished <span>the loop is not holding these</span></h2>
         <div class="body">
+          <div id="poolstrip" class="poolstrip" hidden></div>
           <div id="inflight"></div>
 
           <div class="addform">
@@ -388,6 +413,16 @@
               <span style="font-family:var(--mono);font-size:10.5px;color:var(--ink-2)">)</span>
               <div class="grow" style="flex:1"></div>
               <button id="s-add">Listen +</button>
+            </div>
+            <div class="poolsize">
+              <span>UV_THREADPOOL_SIZE =</span>
+              <input type="number" id="p-size" value="4" min="1" max="16" step="1" aria-label="thread pool size">
+              <span class="gap"></span>
+              <button id="p-apply">Restart process</button>
+            </div>
+            <div style="font-family:var(--mono);font-size:9px;color:var(--ink-3);line-height:1.5;margin-top:5px">
+              The pool is created lazily on the first job and never resized, so changing this restarts the
+              scenario \u2014 exactly as setting the env var and rerunning would.
             </div>
           </div>
 
@@ -676,8 +711,13 @@ let S, seq = 0, timer = null;
 
 function freshSch(){ return {tick:false, promise:false, immediate:false, timeout:false}; }
 
+let POOL = 4;              // UV_THREADPOOL_SIZE — fixed for the life of the process
+let lastSeed = null;
+
 function reset(seedFn){
   if(timer){ clearInterval(timer); timer = null; }
+  if(seedFn) lastSeed = seedFn;
+  if(!lastSeed) lastSeed = seedDefault;
   seq = 0;
   S = {
     now:0, lap:0, frozen:null, st:'lapstart',
@@ -685,11 +725,11 @@ function reset(seedFn){
     stack:null, timeout:null, harvested:0,
     stopped:false, idleH:false, pendingQ:false,
     nTo:0, nImm:0, nTick:0, nMicro:0, nConn:0,
-    parked:false,
-    log:[], note:null, done:false
+    parked:false, poolSize:POOL, threadFree:new Array(POOL).fill(0),
+    log:[], note:null, seedNote:null, done:false
   };
-  (seedFn || seedDefault)();
-  S.note = {h:'ready', t:'Press <b>Step</b> to advance one operation at a time, or <b>Run</b> to play it out. '+
+  lastSeed();
+  S.note = S.seedNote || {h:'ready', t:'Press <b>Step</b> to advance one operation at a time, or <b>Run</b> to play it out. '+
     'Everything in flight below was started by synchronous code that has already returned — the stack is empty, '+
     'so libuv is allowed to turn.'};
   render();
@@ -701,25 +741,72 @@ function op(label, src, ms, sch){
   return {id:++seq, label, src, start:S.now, done:S.now+ms, ms, sch:Object.assign(freshSch(), sch||{})};
 }
 
+/* Submit an operation. Kernel work is watched by the OS and starts at once;
+   pool work has to wait for one of the UV_THREADPOOL_SIZE threads. */
+function submit(o){
+  S.inflight.push(o);
+  if(o.src === 'pool'){
+    o.queued = true;
+    o.enq = S.now;
+    o.done = Infinity;
+    schedulePool();
+  }
+  return o;
+}
+
+/* FIFO over a fixed set of threads: each queued job takes the thread that frees
+   soonest, and cannot start before it was submitted. */
+function schedulePool(){
+  S.inflight.filter(o => o.src === 'pool' && o.queued).forEach(o => {
+    let idx = 0;
+    for(let i = 1; i < S.poolSize; i++){
+      if(S.threadFree[i] < S.threadFree[idx]) idx = i;
+    }
+    const start = Math.max(S.threadFree[idx], o.enq);
+    o.queued = false;
+    o.thread = idx + 1;
+    o.start  = start;
+    o.done   = start + o.ms;
+    S.threadFree[idx] = o.done;
+  });
+}
+
 /* ---------- seeds ---------- */
 function seedDefault(){
-  S.inflight.push(op("fs.readFile('a.txt')", 'pool',   25, {tick:true, promise:true}));
-  S.inflight.push(op('socket fd 7 · read',   'kernel', 25, {immediate:true, timeout:true}));
-  S.inflight.push(op('crypto.pbkdf2()',      'pool',  120, {}));
+  submit(op("fs.readFile('a.txt')", 'pool',   25, {tick:true, promise:true}));
+  submit(op('socket fd 7 · read',   'kernel', 25, {immediate:true, timeout:true}));
+  submit(op('crypto.pbkdf2()',      'pool',  120, {}));
   S.timers.push({id:++seq, label:'setTimeout 60ms', due:60, sch:freshSch()});
 }
 function seedImmediate(){
-  S.inflight.push(op('socket fd 7 · read', 'kernel', 20, {immediate:true, timeout:true}));
+  submit(op('socket fd 7 · read', 'kernel', 20, {immediate:true, timeout:true}));
 }
 function seedBatch(){
-  S.inflight.push(op('socket fd 7 · read',  'kernel', 15, {promise:true}));
-  S.inflight.push(op('socket fd 8 · read',  'kernel', 15, {tick:true}));
-  S.inflight.push(op('socket fd 9 · read',  'kernel', 15, {}));
-  S.inflight.push(op("fs.readFile('z.txt')",'pool',   15, {promise:true}));
+  submit(op('socket fd 7 · read',  'kernel', 15, {promise:true}));
+  submit(op('socket fd 8 · read',  'kernel', 15, {tick:true}));
+  submit(op('socket fd 9 · read',  'kernel', 15, {}));
+  submit(op("fs.readFile('z.txt')",'pool',   15, {promise:true}));
 }
 function seedStarve(){
-  S.inflight.push(op('socket fd 7 · read', 'kernel', 10, {tick:true}));
-  S.inflight.push(op('socket fd 8 · read', 'kernel', 10, {}));
+  // Four outbound requests. http uses dns.lookup(), which is getaddrinfo() on a
+  // pool thread — so four of them occupy the entire default pool.
+  for(let i = 1; i <= 4; i++){
+    submit(op("dns.lookup('api-" + i + ".example.com')", 'pool', 40, {}));
+  }
+  // A fifth lookup, and a tiny file read. Neither is slow. Both are stuck.
+  submit(op("dns.lookup('cdn.example.com')", 'pool', 40, {}));
+  submit(op("fs.readFile('config.json')",    'pool',  5, {promise:true}));
+  // The same work over a socket the kernel watches. Completely unaffected.
+  submit(op('socket fd 7 · read', 'kernel', 10, {}));
+
+  const cfg = S.inflight.find(o => o.label.indexOf('config.json') > -1);
+  S.seedNote = {h:'pool starvation · UV_THREADPOOL_SIZE = ' + S.poolSize,
+    t:'Seven operations, six of them <b>pool</b> work. Look at <code>config.json</code>: it is <b>5 ms</b> of ' +
+      'actual work, and it will not finish until <b>' + cfg.done + ' ms</b> — it is queued behind four ' +
+      '<code>dns.lookup()</code> calls that own every thread. <code>lookup()</code> is <code>getaddrinfo()</code>, ' +
+      'which blocks, so outbound HTTP burns a pool thread <i>per request</i> before a single byte moves. ' +
+      'Meanwhile <code>socket fd 7</code> lands at <b>10 ms</b>, untouched: the kernel is watching it and no ' +
+      'thread is involved. <b>Raise UV_THREADPOOL_SIZE below and the stall disappears.</b>'};
 }
 function seedServer(){
   const o = op('server.listen(3000)', 'kernel', 1, {immediate:false});
@@ -729,10 +816,11 @@ function seedServer(){
   S.inflight.push(o);
 }
 const PRESETS = [
-  ['Default',        seedDefault],
-  ['Immediate wins', seedImmediate],
+  ['Default',          seedDefault],
+  ['Immediate wins',   seedImmediate],
   ['One batch, 4 cbs', seedBatch],
-  ['Server at rest', seedServer]
+  ['Pool starvation',  seedStarve],
+  ['Server at rest',   seedServer]
 ];
 
 /* ============================================================
@@ -1211,7 +1299,7 @@ function esc(s){ return String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt
 function $(id){ return document.getElementById(id); }
 
 function render(){
-  renderStrip(); renderRunner(); renderCascade(); renderInflight();
+  renderStrip(); renderRunner(); renderCascade(); renderPool(); renderInflight();
   renderReady(); renderQueues(); renderLog();
 }
 
@@ -1289,6 +1377,27 @@ function schChips(s){
     : '<div class="chips none">callback schedules nothing</div>';
 }
 
+function renderPool(){
+  const el = $('poolstrip');
+  const pool = S.inflight.filter(o => o.src === 'pool');
+  if(!pool.length){ el.hidden = true; el.innerHTML = ''; return; }
+  el.hidden = false;
+
+  const queued = pool.filter(o => o.start > S.now);
+  let slots = '';
+  for(let i = 1; i <= S.poolSize; i++){
+    const job = pool.find(o => o.thread === i && o.start <= S.now && o.done > S.now);
+    slots += '<div class="slot ' + (job ? 'busy' : 'idle') + '">' +
+      '<span class="tid">thread ' + i + '</span>' +
+      '<span class="job">' + (job ? esc(job.label) + ' \u00b7 ' + (job.done - S.now) + 'ms left' : 'idle') + '</span>' +
+    '</div>';
+  }
+  el.innerHTML =
+    '<div class="ph-h"><b>libuv thread pool</b><span>UV_THREADPOOL_SIZE = ' + S.poolSize + '</span>' +
+      (queued.length ? '<span class="q">' + queued.length + ' waiting for a thread</span>' : '') +
+    '</div><div class="slots">' + slots + '</div>';
+}
+
 function renderInflight(){
   const el = $('inflight');
   if(!S.inflight.length){
@@ -1308,11 +1417,15 @@ function renderInflight(){
           '<button data-conn="' + o.id + '">\u21e2 client connects</button></div>' +
       '</div>';
     }
+    const waiting = o.src === 'pool' && o.start > S.now;
     const left = Math.max(0, o.done - S.now);
-    const pct = Math.max(0, Math.min(100, Math.round(((o.ms - left) / o.ms) * 100))) || 0;
+    const pct = waiting ? 0 : Math.max(0, Math.min(100, Math.round(((o.ms - left) / o.ms) * 100))) || 0;
     const src = SRC[o.src];
-    const rem = left > 100000 ? 'no deadline — waits for a peer' : 'completes in ' + left + ' ms';
-    return '<div class="op ' + src.cls + '">' +
+    const rem = waiting
+      ? 'queued \u00b7 no thread until ' + o.start + ' ms'
+      : left > 100000 ? 'no deadline \u2014 waits for a peer'
+      : 'completes in ' + left + ' ms';
+    return '<div class="op ' + src.cls + (waiting ? ' q' : '') + '">' +
       '<div class="op-h"><span class="owner ' + src.cls + '">' + src.tag + '</span>' +
         '<span class="nm">' + esc(o.label) + '</span>' +
         '<span class="rm">' + rem + '</span>' +
@@ -1400,7 +1513,7 @@ $('f-add').addEventListener('click', () => {
   const label = $('f-label').value.trim() || 'anonymous op';
   const src = $('f-src').value;
   const ms = Math.max(1, Math.min(5000, parseInt($('f-ms').value, 10) || 30));
-  S.inflight.push(op(label, src, ms, newSch));
+  submit(op(label, src, ms, newSch));
   wake();
   logline('sys', null, '+ started: ' + label + '  (' + SRC[src].tag + ', ' + ms + 'ms)');
   note('operation started',
@@ -1438,6 +1551,11 @@ $('condtoggles').addEventListener('keydown', e => {
   e.preventDefault();
   S[t.dataset.cond] = !S[t.dataset.cond];
   render();
+});
+
+$('p-apply').addEventListener('click', () => {
+  POOL = Math.max(1, Math.min(16, parseInt($('p-size').value, 10) || 4));
+  reset();                       // a new pool means a new process
 });
 
 $('s-add').addEventListener('click', () => {
