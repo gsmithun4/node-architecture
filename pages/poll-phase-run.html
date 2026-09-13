@@ -862,6 +862,26 @@ function seedTickStarve(){
       'That is what makes it the more dangerous of the two: a self-queueing promise at least lets other microtasks ' +
       'interleave, and this does not let them run at all. Stops after 12; a real one does not stop.'};
 }
+function seedWake(){
+  // A resting server: nothing due, so poll blocks with no timeout at all.
+  const srv = op('server.listen(3000)', 'kernel', 1, {});
+  srv.done = Infinity; srv.server = true; srv.port = 3000;
+  S.inflight.push(srv);
+  // A worker chewing on CPU work in its own isolate. When it finishes it cannot
+  // run JavaScript here — all it can do is signal through the async handle.
+  submit(op('worker · parseBigJSON()', 'worker', 35, {immediate:true, timeout:true}));
+
+  S.seedNote = {h:'woken from another thread · the async handle',
+    t:'A resting server and one <code>worker_threads</code> worker, 35 ms of CPU work in its own isolate. Nothing ' +
+      'is due, so the cascade falls to <b>rule 7</b> and <code>epoll_wait()</code> blocks with <b>no timeout at ' +
+      'all</b>. Here is the part worth watching: the worker <b>cannot</b> wake this loop by running JavaScript, ' +
+      'because it cannot enter this thread’s V8. When it finishes, the only thing it can do is call ' +
+      '<code>uv_async_send()</code> — writing one byte to a pipe <i>this very</i> <code>epoll_wait</code> is ' +
+      'already watching. <b>That is the only route another thread has into a sleeping loop.</b> Then follow where ' +
+      'its callback sends work: the message runs in <b>poll</b>, its <code>setImmediate</code> in <b>check</b> on ' +
+      'the same lap, and its <code>setTimeout(0)</code> not until the <b>next lap’s timers phase</b>. The loop ' +
+      'then parks again on the server — press <b>client connects</b> to wake it the other way, through a real fd.'};
+}
 function seedServer(){
   const o = op('server.listen(3000)', 'kernel', 1, {immediate:false});
   o.done = Infinity;              // a listening handle never completes
@@ -876,6 +896,7 @@ const PRESETS = [
   ['Pool starvation',  seedStarve],
   ['Microtask starvation', seedMicroStarve],
   ['nextTick starvation', seedTickStarve],
+  ['Woken by a worker', seedWake],
   ['Server at rest',   seedServer]
 ];
 
