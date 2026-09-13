@@ -901,8 +901,15 @@ function seedMicroStarve(){
       'never empty at the boundary, and Node will not hand control back to libuv until it is. The loop never starts. ' +
       'Nothing here saves you: the timer is due, the immediate is queued, the I/O is finished, and none of them run. ' +
       '<b>A real chain has no end</b> — this one gives up after 12 so you can see what the loop does next. ' +
-      'Note the contrast with a recursive <code>setTimeout</code>: that lands in a <i>later lap</i> each time, so the ' +
-      'loop keeps turning. <code>process.nextTick</code> does starve, and it drains even earlier than this. ' +
+      '<b>Why a recursive <code>setTimeout</code> cannot do this:</b> both queues here are re-checked with ' +
+      '<b>no clock involved</b> \u2014 a job that queues its own successor is simply found again on the next look, ' +
+      'forever. The timer heap is different: deadlines are compared against <code>loop-&gt;time</code>, which libuv ' +
+      '<b>freezes at the top of the lap</b> and does not re-read while the phase runs. A timer created now gets ' +
+      '<code>frozen + 1</code> at the earliest \u2014 Node clamps a 0 delay up to 1 \u2014 and ' +
+      '<code>frozen + 1 &gt; frozen</code> is always true, so it is <b>arithmetically undue</b> on the lap that ' +
+      'created it. That is what guarantees the timers phase terminates and these two drains do not. ' +
+      '<code>process.nextTick</code> has the same no-clock problem, and drains even earlier than this. ' +
+      'Full derivation in <b>the reference card at the bottom of the page</b>. ' +
       '<b>One caveat on the recovery:</b> when the chain ends you will see the immediate run before the timer. ' +
       'Scheduled from the <i>main script</i> like this, that race is genuinely nondeterministic in real Node \u2014 it ' +
       'turns on whether the first lap begins before 1 ms has elapsed. The ordering is only <i>guaranteed</i> when ' +
