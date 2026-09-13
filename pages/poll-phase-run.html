@@ -104,6 +104,7 @@
   .readout .rlbl{font-family:var(--mono);font-size:9.5px;letter-spacing:.1em;text-transform:uppercase;color:var(--ink-3)}
   .readout .rval{font-family:var(--disp);font-size:36px;font-weight:700;line-height:1.05;margin:3px 0}
   .readout .rwhy{font-family:var(--mono);font-size:10.5px;line-height:1.5;max-width:360px;margin:4px auto 0}
+  .readout.block code{background:rgba(255,255,255,.14);border-color:rgba(255,255,255,.3);color:#fff}
   .zzz{font-family:var(--mono);font-size:13px;letter-spacing:3px;color:var(--dormant);animation:zpulse 1.3s ease-in-out infinite}
   @keyframes zpulse{0%,100%{opacity:.4}50%{opacity:1}}
 
@@ -127,6 +128,10 @@
   .toggle.on{border-color:var(--uv);background:#fff}
   .toggle .tlbl{font-family:var(--mono);font-size:11px}
   .toggle .tlbl small{display:block;color:var(--ink-3);font-size:9px;margin-top:1px}
+  .toggle .real{display:block;font-size:9px;line-height:1.45;margin-top:4px;padding-top:4px;
+    border-top:1px dotted var(--rule);color:var(--ink-2)}
+  .toggle .real b{color:var(--uv);font-weight:600}
+  .toggle .real code{font-size:9px;padding:0 2px}
   .sw{width:34px;height:19px;border-radius:99px;background:var(--rule);position:relative;flex:0 0 auto;transition:background .15s}
   .sw::after{content:'';position:absolute;top:2px;left:2px;width:15px;height:15px;border-radius:50%;
     background:#fff;transition:left .15s;box-shadow:0 1px 2px rgba(0,0,0,.2)}
@@ -139,6 +144,13 @@
   .op.k{box-shadow:inset 4px 0 0 var(--kernel)}
   .op.p{box-shadow:inset 4px 0 0 var(--pool)}
   .op.w{box-shadow:inset 4px 0 0 var(--worker)}
+  .op.srv{box-shadow:inset 4px 0 0 var(--uv);border-color:var(--uv);background:#fff}
+  .owner.srv{color:var(--uv);border-color:var(--uv)}
+  .srvrow{display:flex;gap:7px;align-items:center;margin-top:7px;padding-top:7px;
+    border-top:1px dotted var(--rule);font-family:var(--mono);font-size:9.5px;color:var(--ink-3)}
+  .srvrow button{padding:3px 8px;font-size:9.5px;border-color:var(--uv);color:var(--uv)}
+  .srvrow button:hover{background:var(--uv);color:#fff}
+  .srvrow .gap{flex:1}
   .op-h{display:flex;gap:8px;align-items:baseline;font-family:var(--mono);font-size:11px}
   .op-h .nm{font-weight:600;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .op-h .rm{color:var(--ink-3);font-size:10px;flex:0 0 auto}
@@ -339,6 +351,13 @@
               <div class="grow" style="flex:1"></div>
               <button id="f-add">Add operation +</button>
             </div>
+            <div class="row" style="margin:8px 0 0;padding-top:8px;border-top:1px dotted var(--rule)">
+              <span style="font-family:var(--mono);font-size:10.5px;color:var(--ink-2)">server.listen(</span>
+              <input type="number" id="s-port" value="3000" min="1" max="65535" step="1" aria-label="port">
+              <span style="font-family:var(--mono);font-size:10.5px;color:var(--ink-2)">)</span>
+              <div class="grow" style="flex:1"></div>
+              <button id="s-add">Listen +</button>
+            </div>
           </div>
 
           <p class="note" style="margin-top:9px">
@@ -484,6 +503,29 @@
           JavaScript. It signalled through the async handle; your callback still runs here, on the main thread.</li>
       </ul>
 
+      <h3>What <code>server.listen(3000)</code> actually does</h3>
+      <ol class="seq">
+        <li>Node creates a TCP handle and calls <code>bind()</code> to claim the port, then <code>listen()</code> to
+          tell the kernel to start queueing connections for it.</li>
+        <li>The listening fd is registered with the loop's poll set — one more descriptor for the
+          <code>epoll_wait()</code> that poll already calls. <b>No thread is used and nothing is queued.</b> This is
+          the single most common misreading of Node: an idle server is not "waiting" in any thread of its own.</li>
+        <li>The handle is <b>referenced</b>, so <code>uv__has_active_handles()</code> stays true forever. Rule 2 can
+          never fire again — which is precisely why a server process does not exit when the script ends.</li>
+        <li>With no timers pending, the cascade falls to <b>rule 7</b>. <code>epoll_wait</code> blocks
+          <b>indefinitely</b>, at ~0% CPU. That is a server at rest, and it is where the process spends almost all
+          of its life.</li>
+        <li>A client connects. The kernel finishes the handshake, puts the connection on that socket's accept queue
+          and marks the fd <b>readable</b>, which returns <code>epoll_wait</code> immediately.</li>
+        <li>In the <b>poll</b> phase libuv calls <code>accept()</code>, wraps the new fd in its own handle, and runs
+          your <code>connection</code> callback — on the main thread, like every other I/O callback. The listening
+          socket is untouched and still in the set.</li>
+      </ol>
+      <p>Two consequences worth holding onto. Everything a <code>connection</code> handler schedules obeys the same
+        rules as any other poll callback — a <code>setImmediate</code> in it beats a <code>setTimeout(fn, 0)</code>
+        beside it, every time. And <code>server.unref()</code> flips point 3: the handle stops counting as
+        referenced, so the loop is free to exit while the server is still technically listening.</p>
+
       <h3>The batch is bounded</h3>
       <p>libuv reads at most a fixed number of events per <code>epoll_wait</code> call and will only re-poll a
         bounded number of times within one iteration. A firehose of ready sockets therefore cannot keep poll
@@ -522,7 +564,8 @@ function reset(seedFn){
     inflight:[], ready:[], tick:[], micro:[], check:[], timers:[], closing:[],
     stack:null, timeout:null, harvested:0,
     stopped:false, idleH:false, pendingQ:false,
-    nTo:0, nImm:0, nTick:0, nMicro:0,
+    nTo:0, nImm:0, nTick:0, nMicro:0, nConn:0,
+    parked:false,
     log:[], note:null, done:false
   };
   (seedFn || seedDefault)();
@@ -531,6 +574,8 @@ function reset(seedFn){
     'so libuv is allowed to turn.'};
   render();
 }
+
+function wake(){ S.done = false; S.parked = false; }
 
 function op(label, src, ms, sch){
   return {id:++seq, label, src, start:S.now, done:S.now+ms, ms, sch:Object.assign(freshSch(), sch||{})};
@@ -556,16 +601,18 @@ function seedStarve(){
   S.inflight.push(op('socket fd 7 · read', 'kernel', 10, {tick:true}));
   S.inflight.push(op('socket fd 8 · read', 'kernel', 10, {}));
 }
-function seedSleep(){
-  const o = op('server socket \u00b7 accept', 'kernel', 1, {});
-  o.done = Infinity;              // nothing will ever make this fd readable
+function seedServer(){
+  const o = op('server.listen(3000)', 'kernel', 1, {immediate:false});
+  o.done = Infinity;              // a listening handle never completes
+  o.server = true;
+  o.port = 3000;
   S.inflight.push(o);
 }
 const PRESETS = [
   ['Default',        seedDefault],
   ['Immediate wins', seedImmediate],
   ['One batch, 4 cbs', seedBatch],
-  ['Idle forever',   seedSleep]
+  ['Server at rest', seedServer]
 ];
 
 /* ============================================================
@@ -762,11 +809,22 @@ function phaseStep(){
       }
 
       if(t < 0 && soonestIO === Infinity){
-        logline('sys', 'poll', 'epoll_wait(timeout=-1) — nothing can ever wake it');
-        note('the loop would hang here',
-          'The timeout is <b>infinite</b> and there is nothing registered that could ever wake it. In a real process ' +
-          'this is a hang. Add an operation below to give the kernel something to report.');
-        S.done = true;
+        const srv = S.inflight.filter(o => o.server);
+        if(!S.parked){
+          logline('sys', 'poll', srv.length
+            ? 'epoll_wait(-1) — parked, watching ' + srv.map(o => ':' + o.port).join(' ')
+            : 'epoll_wait(-1) — nothing can ever wake it');
+        }
+        S.parked = true;
+        note(srv.length ? 'parked in epoll_wait — a server at rest' : 'nothing can wake the loop',
+          srv.length
+            ? 'This is not a stall, it is the steady state of every Node server. The timeout is <b>infinite</b>, the ' +
+              'main thread is blocked inside <code>epoll_wait()</code> watching ' +
+              srv.map(o => '<code>:' + o.port + '</code>').join(' and ') + ', and the process is using <b>~0% CPU</b>. ' +
+              'It will sit here until the kernel marks that fd readable. Press <b>client connects</b> on the ' +
+              'listening handle to make that happen.'
+            : 'The timeout is <b>infinite</b> and nothing registered could ever wake it. In a real process this is a ' +
+              'hang. Add an operation, or start a server, to give the kernel something to report.');
         return false;
       }
 
@@ -813,6 +871,12 @@ function phaseStep(){
         const did = runCb(j, 'poll', 'poll');
         const s = SRC[j.src];
         let body = 'Running <b>' + esc(j.label) + '</b> in the <b>poll phase</b>, on the <b>main thread</b>. ';
+        if(j.conn){
+          body = 'Running the <b>connection</b> handler for <code>:' + j.port + '</code>, in the <b>poll phase</b>. ' +
+            'libuv saw the listening fd was readable, called <code>accept()</code> to take the connection off the ' +
+            'kernel\u2019s accept queue, wrapped the new fd in a handle, and invoked your callback. The listening ' +
+            'socket is still in the epoll set, unchanged, ready for the next one.';
+        } else
         body += j.src === 'pool'
           ? 'A thread-pool worker did the blocking work, then signalled the loop through libuv’s <b>async handle</b> — ' +
             'it could not run this JavaScript itself. Only the loop thread can enter V8.'
@@ -914,7 +978,7 @@ function addTimeout(raw){
   const eff = Math.max(1, Math.floor(raw) || 0);   // Node clamps anything below 1 up to 1
   const due = S.now + eff;
   S.timers.push({id:++seq, label:'setTimeout ' + raw + 'ms #' + (++S.nTo), due, sch:freshSch()});
-  S.done = false;
+  wake();
   logline('macrol', null, '+ setTimeout(fn, ' + raw + ')  \u2192 timer heap, due ' + due + 'ms');
 
   let body = 'Queued in the <b>timer heap</b> with a deadline of <b>' + due + ' ms</b>' +
@@ -935,7 +999,7 @@ function addTimeout(raw){
 
 function addImmediate(){
   S.check.push({id:++seq, label:'setImmediate #' + (++S.nImm), sch:freshSch()});
-  S.done = false;
+  wake();
   logline('checkl', null, '+ setImmediate(fn)  \u2192 check queue');
   note('setImmediate scheduled',
     'Queued for the <b>check</b> phase. Now look at panel 1: <b>rule 3 has taken over</b> and the poll timeout is ' +
@@ -950,7 +1014,7 @@ function addImmediate(){
 
 function addTick(){
   S.tick.push({id:++seq, label:'nextTick #' + (++S.nTick)});
-  S.done = false;
+  wake();
   logline('tickl', null, '+ process.nextTick(fn)  \u2192 nextTick queue');
   note('process.nextTick scheduled',
     'Queued in <b>Node\u2019s own</b> nextTick queue \u2014 neither V8 nor libuv knows it exists. Press <b>Step</b> and it ' +
@@ -962,13 +1026,51 @@ function addTick(){
 
 function addMicro(){
   S.micro.push({id:++seq, label:'promise #' + (++S.nMicro) + ' \u2192 .then'});
-  S.done = false;
+  wake();
   logline('microl', null, '+ Promise.resolve().then(fn)  \u2192 microtask queue');
   note('microtask scheduled',
     'Queued in <b>V8\u2019s</b> microtask queue. Node decides <i>when</i> to tell V8 to empty it, but the queue itself ' +
     'belongs to the engine. It drains at the next boundary \u2014 after the nextTick queue, and completely: anything ' +
     'queued during the drain joins the same drain. That is the mechanism behind a promise chain freezing the ' +
     'loop for good.');
+  render();
+}
+
+function addServer(port){
+  const o = op('server.listen(' + port + ')', 'kernel', 1, {});
+  o.done = Infinity;          // a listening handle never "completes"
+  o.server = true;
+  o.port = port;
+  S.inflight.push(o);
+  wake();
+  logline('sys', null, '+ server.listen(' + port + ')  \u2192 bind() + listen(), fd registered with epoll');
+  note('server.listen(' + port + ')',
+    'Node created a TCP handle and called <code>bind()</code>, then <code>listen()</code>, then handed the ' +
+    'listening fd to the loop\u2019s poll set. No thread is involved and nothing is queued \u2014 there is just one ' +
+    'more fd in the set <code>epoll_wait()</code> watches. ' +
+    '<b>Two consequences, both visible in panel 1.</b> It is a <i>referenced handle</i>, so rule 2 can never fire ' +
+    'again and the process will not exit on its own. And with no timers, the cascade falls all the way to ' +
+    '<b>rule 7</b>: <code>epoll_wait</code> blocks <b>indefinitely</b>, at ~0% CPU, until a client shows up. ' +
+    'That is a Node server at rest.');
+  render();
+}
+
+function connectClient(id){
+  const srv = S.inflight.find(o => o.id === id && o.server);
+  if(!srv) return;
+  const c = op('connection on :' + srv.port + ' #' + (++S.nConn), 'kernel', 1, srv.sch);
+  c.done = S.now;             // the packet is here now
+  c.conn = true;
+  c.port = srv.port;
+  S.inflight.push(c);
+  wake();
+  logline('sys', null, '\u21e2 SYN on :' + srv.port + '  \u2014 kernel marks the listening fd readable');
+  note('a client connected',
+    'The kernel completed the handshake, put the connection on the listening socket\u2019s accept queue, and marked ' +
+    'that fd <b>readable</b>. That is what breaks <code>epoll_wait()</code> out of its indefinite block. ' +
+    'On the next poll, libuv will see the fd, call <code>accept()</code> to pull the connection off the queue, and ' +
+    'run your <code>connection</code> handler \u2014 <b>in the poll phase, on the main thread</b>. ' +
+    'The listening handle itself stays exactly where it is.');
   render();
 }
 
@@ -1009,7 +1111,7 @@ function renderRunner(){
     fr.textContent = S.stack.label;
   } else {
     box.className = 'stackbox empty';
-    fr.textContent = S.done ? 'loop exited' : 'empty';
+    fr.textContent = S.done ? 'loop exited' : S.parked ? 'empty \u00b7 parked in epoll_wait' : 'empty';
   }
   $('btn-step').disabled = S.done;
   $('btn-run').disabled = S.done;
@@ -1038,12 +1140,22 @@ function renderCascade(){
   }).join('');
 
   $('condtoggles').innerHTML = [
-    ['stopped', 'uv_stop() called',        'sets loop->stop_flag'],
-    ['idleH',   'an idle handle is active','uv_idle_start() — runs every tick'],
-    ['pendingQ','pending_queue not empty', 'callbacks deferred from the last lap']
-  ].map(([k, lbl, sub]) =>
+    ['stopped', 'uv_stop() called', 'sets loop->stop_flag',
+     '<b>In real life:</b> <code>worker.terminate()</code> on a <code>worker_threads</code> worker stops that ' +
+     'worker’s loop, and Node calls it on its own teardown path. There is no way to set this flag from ' +
+     'ordinary JavaScript — it belongs to the embedder (<code>node::Stop()</code>).'],
+    ['idleH', 'an idle handle is active', 'uv_idle_start() — runs every tick',
+     '<b>In real life:</b> a pending <code>setImmediate</code> — Node keeps an idle handle active while any are ' +
+     'queued, and that path is already wired live from the check queue below. This switch stands for the other ' +
+     'case: a <b>native addon</b> holding a <code>uv_idle_t</code> open for a per-iteration hook.'],
+    ['pendingQ', 'pending_queue not empty', 'callbacks deferred from the last lap',
+     '<b>In real life:</b> <code>net.connect()</code> to a port nothing is listening on. On many *nix systems ' +
+     'libuv will not report the <code>ECONNREFUSED</code> inline — it defers the error callback to the ' +
+     '<b>pending</b> phase of the next iteration. Stream write errors take the same route.']
+  ].map(([k, lbl, sub, real]) =>
     '<div class="toggle' + (S[k] ? ' on' : '') + '" data-cond="' + k + '" role="button" tabindex="0">' +
-      '<span class="tlbl">' + lbl + '<small>' + sub + '</small></span><span class="sw"></span></div>').join('');
+      '<span class="tlbl">' + lbl + '<small>' + sub + '</small>' +
+      '<span class="real">' + real + '</span></span><span class="sw"></span></div>').join('');
 }
 
 function schChips(s){
@@ -1064,6 +1176,18 @@ function renderInflight(){
     return;
   }
   el.innerHTML = S.inflight.map(o => {
+    if(o.server){
+      return '<div class="op srv">' +
+        '<div class="op-h"><span class="owner srv">listening</span>' +
+          '<span class="nm">' + esc(o.label) + '</span>' +
+          '<span class="rm">fd in the epoll set</span>' +
+          '<button class="x" data-del="' + o.id + '" title="close the server">\u00d7</button></div>' +
+        schChips(o.sch) +
+        '<div class="srvrow"><span>keeps the loop alive \u00b7 no deadline \u00b7 wakes on a SYN</span>' +
+          '<span class="gap"></span>' +
+          '<button data-conn="' + o.id + '">\u21e2 client connects</button></div>' +
+      '</div>';
+    }
     const left = Math.max(0, o.done - S.now);
     const pct = Math.max(0, Math.min(100, Math.round(((o.ms - left) / o.ms) * 100))) || 0;
     const src = SRC[o.src];
@@ -1157,7 +1281,7 @@ $('f-add').addEventListener('click', () => {
   const src = $('f-src').value;
   const ms = Math.max(1, Math.min(5000, parseInt($('f-ms').value, 10) || 30));
   S.inflight.push(op(label, src, ms, newSch));
-  S.done = false;
+  wake();
   logline('sys', null, '+ started: ' + label + '  (' + SRC[src].tag + ', ' + ms + 'ms)');
   note('operation started',
     '<b>' + esc(label) + '</b> was handed to ' +
@@ -1169,6 +1293,8 @@ $('f-add').addEventListener('click', () => {
 });
 
 $('inflight').addEventListener('click', e => {
+  const c = e.target.closest('[data-conn]');
+  if(c){ connectClient(+c.dataset.conn); return; }
   const b = e.target.closest('[data-del]');
   if(!b) return;
   const id = +b.dataset.del;
@@ -1192,6 +1318,10 @@ $('condtoggles').addEventListener('keydown', e => {
   e.preventDefault();
   S[t.dataset.cond] = !S[t.dataset.cond];
   render();
+});
+
+$('s-add').addEventListener('click', () => {
+  addServer(Math.max(1, Math.min(65535, parseInt($('s-port').value, 10) || 3000)));
 });
 
 $('n-add').addEventListener('click', addTick);
