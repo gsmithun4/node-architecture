@@ -164,6 +164,14 @@
 
   .ph-empty{font-family:var(--mono);font-size:10.5px;color:var(--ink-3);font-style:italic;padding:6px 2px}
 
+  /* ---------- schedule-directly rows ---------- */
+  .q-add{display:flex;gap:6px;align-items:center;padding:7px 9px;border-top:1.5px dashed var(--rule);
+    background:var(--panel-2);font-family:var(--mono);font-size:10.5px;flex-wrap:wrap}
+  .q-add .sig{color:var(--ink-2)}
+  .q-add input[type=number]{width:62px;padding:3px 6px;font-size:10.5px}
+  .q-add button{padding:4px 9px;font-size:10px}
+  .q-add .gap{flex:1}
+
   /* ---------- queue lanes ---------- */
   .q{border:1.5px solid var(--rule);border-radius:2px;margin-bottom:8px;overflow:hidden}
   .q:last-child{margin-bottom:0}
@@ -182,6 +190,9 @@
   .item.uv{border-color:var(--uv);color:var(--uv)}
   .item.next{background:var(--hl)}
   .item small{opacity:.65;margin-left:5px}
+  .item .x{border:0;background:transparent;color:inherit;opacity:.45;padding:0 0 0 5px;font-size:12px;
+    line-height:1;cursor:pointer}
+  .item .x:hover{background:transparent;opacity:1}
 
   /* ---------- add form ---------- */
   .addform{border:1.5px dashed var(--rule);border-radius:2px;padding:9px;margin-top:9px;background:var(--panel-2)}
@@ -385,17 +396,36 @@
           <div class="q-h"><i class="dot" style="background:var(--macro)"></i><b>Timer heap</b>
             <small>setTimeout · previous phase</small></div>
           <div class="lane" id="q-timers"></div>
+          <div class="q-add">
+            <span class="sig">setTimeout( fn,</span>
+            <input type="number" id="t-ms" value="0" min="0" max="10000" step="1" aria-label="timeout delay in ms">
+            <span class="sig">ms )</span>
+            <span class="gap"></span>
+            <button id="t-add">Schedule +</button>
+          </div>
         </div>
         <div class="q">
           <div class="q-h"><i class="dot" style="background:var(--check)"></i><b>Check queue</b>
             <small>setImmediate · next phase</small></div>
           <div class="lane" id="q-check"></div>
+          <div class="q-add">
+            <span class="sig">setImmediate( fn )</span>
+            <span class="gap"></span>
+            <button id="i-add">Schedule +</button>
+          </div>
         </div>
         <p class="note">
           Both are filled from inside poll callbacks, and this is the whole
           <code>setImmediate</code>-vs-<code>setTimeout(…,0)</code> story. <b>Check is one phase away.</b>
           A timer created now gets a deadline <i>after</i> the clock libuv froze at the top of this lap, so it
           cannot be due until the next one.
+        </p>
+        <p class="note" style="margin-top:8px">
+          <b>Schedule either one by hand</b> with the rows above — that is your top-level script calling them,
+          rather than an I/O callback. Two things to watch. A <code>setTimeout(fn, 0)</code> is stored as
+          <b>1 ms</b>, because Node clamps any delay below 1 up to 1. And the moment a
+          <code>setImmediate</code> is pending, <b>rule 3</b> in panel 1 takes over and the poll timeout
+          collapses to <code>0</code> — the loop stops sleeping entirely.
         </p>
       </div>
     </div>
@@ -476,6 +506,7 @@ function reset(seedFn){
     inflight:[], ready:[], tick:[], micro:[], check:[], timers:[], closing:[],
     stack:null, timeout:null, harvested:0,
     stopped:false, idleH:false, pendingQ:false,
+    nTo:0, nImm:0,
     log:[], note:null, done:false
   };
   (seedFn || seedDefault)();
@@ -860,6 +891,57 @@ function tail(did){
 }
 
 /* ============================================================
+   scheduling by hand \u2014 as if top-level script code ran it
+   ============================================================ */
+function addTimeout(raw){
+  const eff = Math.max(1, Math.floor(raw) || 0);   // Node clamps anything below 1 up to 1
+  const due = S.now + eff;
+  S.timers.push({id:++seq, label:'setTimeout ' + raw + 'ms #' + (++S.nTo), due, sch:freshSch()});
+  S.done = false;
+  logline('macrol', null, '+ setTimeout(fn, ' + raw + ')  \u2192 timer heap, due ' + due + 'ms');
+
+  let body = 'Queued in the <b>timer heap</b> with a deadline of <b>' + due + ' ms</b>' +
+    (eff !== raw
+      ? ' \u2014 you asked for <code>' + raw + '</code>, but Node clamps any delay below 1 up to <b>1 ms</b>, so this is <code>' + eff + '</code>.'
+      : '.');
+  if(S.frozen === null){
+    body += ' The loop has not started yet, so this is measured against the clock libuv freezes on its first lap.';
+  } else if(due > S.frozen){
+    body += ' The clock for this lap was frozen at <b>' + S.frozen + ' ms</b>, and ' + due + ' is after it \u2014 so this timer <b>cannot run on this iteration</b>, however small the delay was.';
+  } else {
+    body += ' That is at or before the frozen clock (' + S.frozen + ' ms), so the timers phase will pick it up.';
+  }
+  body += ' Watch rule 6 in panel 1: if nothing above it matches, this deadline is now exactly how long poll may sleep.';
+  note('setTimeout scheduled', body);
+  render();
+}
+
+function addImmediate(){
+  S.check.push({id:++seq, label:'setImmediate #' + (++S.nImm), sch:freshSch()});
+  S.done = false;
+  logline('checkl', null, '+ setImmediate(fn)  \u2192 check queue');
+  note('setImmediate scheduled',
+    'Queued for the <b>check</b> phase. Now look at panel 1: <b>rule 3 has taken over</b> and the poll timeout is ' +
+    '<code>0</code>. Node keeps an active <b>idle handle</b> while any immediate is pending, so ' +
+    '<code>epoll_wait()</code> is called with a zero timeout and returns instantly \u2014 the loop will not sleep ' +
+    'while there is guaranteed work one phase away. ' +
+    (S.st === 'check'
+      ? 'You added this <i>during</i> the check phase, so it still runs before the phase ends in this model.'
+      : 'It runs as soon as poll finishes its batch.'));
+  render();
+}
+
+function removeQueued(arr, id, what){
+  const j = arr.find(x => x.id === id);
+  if(!j) return;
+  arr.splice(arr.indexOf(j), 1);
+  logline('sys', null, '\u2212 cancelled: ' + j.label);
+  note(what + ' cancelled',
+    '<b>' + esc(j.label) + '</b> was removed from the queue. Check whether that changed which cascade rule wins.');
+  render();
+}
+
+/* ============================================================
    rendering
    ============================================================ */
 function esc(s){ return String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
@@ -974,20 +1056,22 @@ function renderReady(){
   }).join('');
 }
 
-function lane(id, arr, cls, empty, extra){
+function lane(id, arr, cls, empty, extra, del){
   const el = $(id);
   if(!arr.length){ el.innerHTML = '<span class="ph-empty">' + empty + '</span>'; return; }
   el.innerHTML = arr.map((j, i) =>
     '<span class="item ' + cls + (i === 0 ? ' next' : '') + '">' + esc(j.label) +
-      (extra ? '<small>' + extra(j) + '</small>' : '') + '</span>').join('');
+      (extra ? '<small>' + extra(j) + '</small>' : '') +
+      (del ? '<button class="x" data-qdel="' + j.id + '" title="cancel">\u00d7</button>' : '') +
+    '</span>').join('');
 }
 
 function renderQueues(){
   lane('q-tick',  S.tick,  'tick',  'empty');
   lane('q-micro', S.micro, 'micro', 'empty');
   lane('q-timers', S.timers.slice().sort((a, b) => a.due - b.due), 'macro', 'no timers',
-    t => 'due ' + t.due + 'ms' + (S.frozen !== null && t.due > S.frozen ? ' · next lap' : ''));
-  lane('q-check', S.check, 'check', 'no setImmediate pending');
+    t => 'due ' + t.due + 'ms' + (S.frozen !== null && t.due > S.frozen ? ' · next lap' : ''), true);
+  lane('q-check', S.check, 'check', 'no setImmediate pending', null, true);
 }
 
 function renderLog(){
@@ -1067,6 +1151,20 @@ $('condtoggles').addEventListener('keydown', e => {
   e.preventDefault();
   S[t.dataset.cond] = !S[t.dataset.cond];
   render();
+});
+
+$('t-add').addEventListener('click', () => {
+  addTimeout(Math.max(0, Math.min(10000, parseInt($('t-ms').value, 10) || 0)));
+});
+$('i-add').addEventListener('click', addImmediate);
+
+$('q-timers').addEventListener('click', e => {
+  const b = e.target.closest('[data-qdel]');
+  if(b) removeQueued(S.timers, +b.dataset.qdel, 'Timer');
+});
+$('q-check').addEventListener('click', e => {
+  const b = e.target.closest('[data-qdel]');
+  if(b) removeQueued(S.check, +b.dataset.qdel, 'Immediate');
 });
 
 function stopRun(){ if(timer){ clearInterval(timer); timer = null; } }
