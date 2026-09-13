@@ -735,7 +735,19 @@ function reset(seedFn){
   render();
 }
 
-function wake(){ S.done = false; S.parked = false; }
+/* Something arrived while the loop was asleep. In a real process only another
+   thread can do this, and it signals through the async handle; either way the
+   sleeping epoll_wait is interrupted. If nothing is actually ready to harvest,
+   the loop has to run uv_backend_timeout() again rather than reuse the timeout
+   it computed before it went to sleep. */
+function wake(){
+  S.done = false;
+  if(S.parked){
+    S.parked = false;
+    const ready = S.inflight.some(o => o.done <= S.now);
+    if(S.st === 'block' && !ready) S.st = 'timeout';
+  }
+}
 
 function op(label, src, ms, sch){
   return {id:++seq, label, src, start:S.now, done:S.now+ms, ms, sch:Object.assign(freshSch(), sch||{})};
@@ -776,7 +788,7 @@ function seedDefault(){
   submit(op("fs.readFile('a.txt')", 'pool',   25, {tick:true, promise:true}));
   submit(op('socket fd 7 · read',   'kernel', 25, {immediate:true, timeout:true}));
   submit(op('crypto.pbkdf2()',      'pool',  120, {}));
-  S.timers.push({id:++seq, label:'setTimeout 60ms', due:60, sch:freshSch()});
+  S.timers.push({id:++seq, label:'setTimeout(fn, 60)', due:60, sch:freshSch()});
 }
 function seedImmediate(){
   submit(op('socket fd 7 · read', 'kernel', 20, {immediate:true, timeout:true}));
