@@ -257,7 +257,38 @@
     border:1.5px solid var(--uv);color:var(--uv);border-radius:50%;font-family:var(--mono);font-size:10px;
     font-weight:600;display:flex;align-items:center;justify-content:center}
 
-  @media (max-width:900px){ .grid2{grid-template-columns:minmax(0,1fr)} }
+  /* ---------- three-owner comparison ---------- */
+  .grid3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;align-items:stretch}
+  .owncol{border:1.5px solid var(--rule);border-radius:2px;padding:10px;background:var(--panel-2);
+    display:flex;flex-direction:column}
+  .owncol.k{box-shadow:inset 0 4px 0 var(--kernel)}
+  .owncol.p{box-shadow:inset 0 4px 0 var(--pool)}
+  .owncol.w{box-shadow:inset 0 4px 0 var(--worker)}
+  .owncol h4{font-family:var(--mono);font-size:11px;font-weight:600;letter-spacing:.04em;margin:5px 0 2px}
+  .owncol.k h4{color:var(--kernel)} .owncol.p h4{color:var(--pool)} .owncol.w h4{color:var(--worker)}
+  .owncol .syscall{font-family:var(--mono);font-size:9px;color:var(--ink-3);margin-bottom:8px}
+  .owncol .lede{font-size:12px;line-height:1.55;color:var(--ink);margin:0 0 9px}
+  .kv{border-top:1px dotted var(--rule);padding:6px 0;font-family:var(--mono);font-size:10px;line-height:1.5}
+  .kv > b:first-child{display:block;font-size:8.5px;letter-spacing:.08em;text-transform:uppercase;
+    color:var(--ink-3);font-weight:600;margin-bottom:2px}
+  .kv .big{font-size:15px;font-weight:700;font-family:var(--disp)}
+  .owncol.k .kv .big{color:var(--kernel)} .owncol.p .kv .big{color:var(--pool)} .owncol.w .kv .big{color:var(--worker)}
+  .kv.warn{margin-top:auto;border-top:1.5px solid var(--rule);color:var(--ink-2)}
+  .kv.warn > b:first-child{color:var(--tick)}
+
+  .tblwrap{overflow-x:auto;margin-top:12px;border:1.5px solid var(--rule);border-radius:2px}
+  table.goes{border-collapse:collapse;width:100%;font-family:var(--mono);font-size:10.5px}
+  table.goes th,table.goes td{text-align:left;padding:5px 9px;border-bottom:1px solid var(--rule);white-space:nowrap}
+  table.goes th{font-size:8.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-3);
+    background:var(--panel-2);font-weight:600}
+  table.goes tr:last-child td{border-bottom:0}
+  table.goes td.owner-k{color:var(--kernel);font-weight:600}
+  table.goes td.owner-p{color:var(--pool);font-weight:600}
+  table.goes td.owner-w{color:var(--worker);font-weight:600}
+  table.goes td.owner-m{color:var(--ink);font-weight:600}
+  table.goes tr.flag td{background:var(--hl)}
+
+  @media (max-width:900px){ .grid2,.grid3{grid-template-columns:minmax(0,1fr)} }
 </style>
 </head>
 <body>
@@ -364,7 +395,8 @@
             Nothing here is on a queue yet. A <b>kernel</b> op is an fd registered with
             <code>epoll</code>/<code>kqueue</code>/<code>IOCP</code> — zero threads. A <b>pool</b> op is occupying one of
             the four <code>UV_THREADPOOL_SIZE</code> threads; when it finishes it can only call
-            <code>uv_async_send()</code>, because a worker thread cannot enter V8.
+            <code>uv_async_send()</code>, because a worker thread cannot enter V8. The three owners are
+            compared in full <b>at the bottom of this page</b>.
           </p>
         </div>
       </div>
@@ -470,6 +502,94 @@
   <div class="card">
     <h2>6 · Operation log <span>every step, in order</span></h2>
     <div class="log" id="log"></div>
+  </div>
+
+  <!-- ======================= THE THREE OWNERS ======================= -->
+  <div class="card">
+    <h2>The three ways an operation waits <span>what the owner badge in panel 2 means</span></h2>
+    <div class="body">
+      <div class="grid3">
+
+        <div class="owncol k">
+          <h4>kernel</h4>
+          <div class="syscall">epoll (Linux) · kqueue (BSD/macOS) · IOCP (Windows)</div>
+          <p class="lede">The OS watches the descriptor. <b>Nobody waits</b> — there is no thread parked on your
+            socket, just one more fd in the set that <code>epoll_wait()</code> already polls.</p>
+          <div class="kv"><b>threads used</b><span class="big">0</span></div>
+          <div class="kv"><b>what goes here</b>
+            <code>net</code> · <code>http</code> · <code>https</code> · <code>tls</code> ·
+            <code>server.listen()</code> · pipes and IPC · TTY · child-process stdio · signals ·
+            <code>dns.resolve()</code></div>
+          <div class="kv"><b>how it wakes the loop</b>the fd becomes readable or writable and
+            <code>epoll_wait()</code> returns it</div>
+          <div class="kv"><b>scales to</b>tens of thousands of live sockets — the ceiling is file descriptors and
+            memory, never thread count</div>
+          <div class="kv warn"><b>the catch</b>regular files cannot use this. A disk file is <i>always</i> reported
+            ready, so there is no readiness event to wait for — which is exactly why <code>fs</code> goes to the
+            pool instead.</div>
+        </div>
+
+        <div class="owncol p">
+          <h4>libuv thread pool</h4>
+          <div class="syscall">4 threads by default · UV_THREADPOOL_SIZE</div>
+          <p class="lede">A real OS thread makes the <b>blocking</b> call on your behalf. Used wherever the platform
+            offers no async primitive worth having.</p>
+          <div class="kv"><b>threads used</b><span class="big">1</span> per in-flight job, out of 4 (max 1024)</div>
+          <div class="kv"><b>what goes here</b>
+            <code>fs.*</code> · <code>dns.lookup()</code> · <code>zlib.*</code> ·
+            <code>crypto.pbkdf2</code> / <code>scrypt</code> / <code>randomBytes</code> /
+            <code>generateKeyPair</code> · native addons calling <code>uv_queue_work()</code></div>
+          <div class="kv"><b>how it wakes the loop</b>it <i>cannot</i> run your JavaScript — it calls
+            <code>uv_async_send()</code>, writing one byte to a pipe the poll phase is already watching</div>
+          <div class="kv"><b>scales to</b>4 at a time. The fifth job queues behind them.</div>
+          <div class="kv warn"><b>the catch</b>fixed size and shared <b>process-wide</b>, worker threads included.
+            Four slow <code>pbkdf2</code> calls stall every <code>fs</code> read behind them. Set
+            <code>UV_THREADPOOL_SIZE</code> before the first job — the pool is created lazily and never resized.</div>
+        </div>
+
+        <div class="owncol w">
+          <h4>worker_threads</h4>
+          <div class="syscall">a second V8 isolate · its own event loop</div>
+          <p class="lede">Not a helper thread — <b>a second Node</b>. Its own isolate, its own heap, its own libuv
+            loop with all six phases. The only way to run your JavaScript genuinely in parallel.</p>
+          <div class="kv"><b>threads used</b><span class="big">1</span> per worker, plus that worker's own loop</div>
+          <div class="kv"><b>what goes here</b>CPU-bound <b>JavaScript you write</b>. Nothing in core routes here
+            automatically — you create the worker yourself.</div>
+          <div class="kv"><b>how it wakes the loop</b><code>postMessage</code> crosses a MessagePort backed by an
+            async handle, so it lands in the receiving thread's <b>poll phase</b> like any other I/O event</div>
+          <div class="kv"><b>scales to</b>roughly your core count. Past that you are just context-switching.</div>
+          <div class="kv warn"><b>the catch</b>an isolate costs real memory and startup time, so pool workers rather
+            than spawning per task. Values are <b>structured-cloned</b>, not shared, unless you transfer them or use
+            a <code>SharedArrayBuffer</code>.</div>
+        </div>
+
+      </div>
+
+      <div class="tblwrap">
+        <table class="goes">
+          <thead><tr><th>call</th><th>owner</th><th>why</th></tr></thead>
+          <tbody>
+            <tr><td><code>server.listen(3000)</code></td><td class="owner-k">kernel</td><td>a listening fd in the epoll set</td></tr>
+            <tr><td><code>http</code> request / response</td><td class="owner-k">kernel</td><td>sockets, readiness-driven</td></tr>
+            <tr class="flag"><td><code>dns.resolve()</code></td><td class="owner-k">kernel</td><td>c-ares speaks DNS over its own sockets</td></tr>
+            <tr class="flag"><td><code>dns.lookup()</code></td><td class="owner-p">pool</td><td><code>getaddrinfo()</code> is blocking — same name, opposite mechanism</td></tr>
+            <tr><td><code>fs.readFile()</code></td><td class="owner-p">pool</td><td>no readiness signal exists for disk files</td></tr>
+            <tr><td><code>crypto.pbkdf2()</code></td><td class="owner-p">pool</td><td>slow C++, deliberately kept off the loop thread</td></tr>
+            <tr><td><code>zlib.gzip()</code></td><td class="owner-p">pool</td><td>same — CPU-heavy native work</td></tr>
+            <tr><td><code>crypto.createHash()</code></td><td class="owner-m">main thread</td><td>synchronous: it blocks the loop outright</td></tr>
+            <tr><td><code>JSON.parse()</code> on 50 MB</td><td class="owner-m">main thread</td><td>nothing offloads this — this is what workers are for</td></tr>
+            <tr><td><code>worker.postMessage()</code></td><td class="owner-w">worker</td><td>MessagePort → async handle → poll phase</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <p class="note" style="margin-top:11px">
+        The two highlighted rows are the classic trap. <code>dns.lookup()</code> and <code>dns.resolve()</code> sound
+        interchangeable and are not: <code>lookup</code> burns a <b>pool thread</b> per call, so a burst of outbound
+        HTTP requests — which use <code>lookup</code> by default — can saturate all four threads and stall every
+        <code>fs</code> operation in the process.
+      </p>
+    </div>
   </div>
 
   <!-- ======================= REFERENCE ======================= -->
