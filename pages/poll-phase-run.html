@@ -277,6 +277,20 @@
   .prose li{margin:4px 0}
   .prose .seq{list-style:none;padding-left:0;counter-reset:s}
   .prose .seq li{counter-increment:s;padding-left:30px;position:relative;margin:8px 0}
+  .prose pre{font-family:var(--mono);font-size:10.5px;line-height:1.6;background:var(--panel-2);
+    border:1.5px solid var(--rule);border-radius:2px;padding:9px 11px;overflow-x:auto;margin:9px 0}
+  .prose pre i{color:var(--ink-3);font-style:normal}
+  .prose pre b{color:var(--uv);font-weight:600}
+  .prose .twocol{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin:9px 0}
+  .prose .twocol div{border:1.5px solid var(--rule);border-radius:2px;padding:9px 10px;background:var(--panel-2);
+    font-size:12px;line-height:1.5}
+  .prose .twocol .hd{display:block;font-family:var(--mono);font-size:9px;letter-spacing:.08em;
+    text-transform:uppercase;margin-bottom:4px}
+  .prose .twocol .safe{box-shadow:inset 4px 0 0 var(--uv)}
+  .prose .twocol .safe .hd{color:var(--uv)}
+  .prose .twocol .bad{box-shadow:inset 4px 0 0 var(--tick)}
+  .prose .twocol .bad .hd{color:var(--tick)}
+  @media (max-width:900px){ .prose .twocol{grid-template-columns:minmax(0,1fr)} }
   .prose .seq li::before{content:counter(s);position:absolute;left:0;top:1px;width:20px;height:20px;
     border:1.5px solid var(--uv);color:var(--uv);border-radius:50%;font-family:var(--mono);font-size:10px;
     font-weight:600;display:flex;align-items:center;justify-content:center}
@@ -657,6 +671,58 @@
         <li><b>Pool completions land in poll too.</b> The worker did the blocking work but could not run your
           JavaScript. It signalled through the async handle; your callback still runs here, on the main thread.</li>
       </ul>
+
+      <h3>Why the clock is frozen for the whole lap</h3>
+      <p><code>uv_run()</code> samples the clock <b>exactly once per iteration</b>, at the very top:</p>
+<pre><i>while</i> (r != 0 &amp;&amp; loop-&gt;stop_flag == 0) {
+  <b>uv__update_time(loop);</b>      <i>/* loop-&gt;time = now, ONCE */</i>
+  uv__run_timers(loop);       <i>/* compared against loop-&gt;time */</i>
+  ...
+  uv__io_poll(loop, timeout);
+  ...
+}</pre>
+      <p>And <code>uv_timer_start()</code> computes a deadline against <b>that same frozen value</b>, not against
+        the wall clock:</p>
+<pre>handle-&gt;timeout = <b>loop-&gt;time</b> + timeout;</pre>
+      <p>Node clamps any delay below 1 up to 1, so the earliest deadline you can create during a lap is
+        <code>loop-&gt;time + 1</code>. The timers phase drains while <code>handle-&gt;timeout &lt;= loop-&gt;time</code>
+        — and <code>frozen + 1 &gt; frozen</code> is always true. <b>A timer created during a lap can never be due
+        on that lap.</b> That is arithmetic, not policy.</p>
+
+      <h3>What the frozen clock buys you</h3>
+      <p>The timers phase is a <code>for(;;)</code> loop that re-reads the heap minimum on every pass — so a timer
+        callback feeds the very heap being drained:</p>
+<pre><i>for</i> (;;) {
+  heap_node = heap_min(timer_heap(loop));
+  <i>if</i> (heap_node == NULL) <i>break</i>;
+  handle = container_of(heap_node, uv_timer_t, node.heap);
+  <i>if</i> (handle-&gt;timeout &gt; <b>loop-&gt;time</b>) <i>break</i>;   <i>/* not due — stop */</i>
+  uv_timer_stop(handle);
+  uv_timer_again(handle);
+  handle-&gt;timer_cb(handle);
+}</pre>
+      <p>If <code>loop-&gt;time</code> were re-read from the wall clock on each pass, a recursive
+        <code>setTimeout(fn, 0)</code> inside a timer callback would become due again the moment 1 ms of real time
+        had elapsed — and callbacks easily take that long. The phase would keep finding a due timer and never
+        break. Freezing the clock makes that impossible by construction.</p>
+
+      <div class="twocol">
+        <div class="bad"><span class="hd">re-checked with no clock</span>
+          <b>nextTick and promises.</b> A job that queues its own successor is found again immediately, so the drain
+          never ends and the loop never turns. See the two starvation presets.</div>
+        <div class="safe"><span class="hd">compared against a frozen value</span>
+          <b>setTimeout.</b> A new deadline is always strictly greater than the value being compared against, so the
+          phase is guaranteed to terminate. Recursion here is always safe.</div>
+      </div>
+
+      <p>Note that <b>two independent things</b> defer a timer created mid-lap. Ordering is the obvious one: timers
+        is the <i>first</i> phase, so from a poll callback it has already run. The arithmetic above is what covers
+        the case ordering does not — a timer created <i>inside a timer callback</i>, while
+        <code>uv__run_timers</code> is still looping.</p>
+      <p>Which is why <code>setTimeout(fn, 0)</code> does not mean “as soon as possible”. It means
+        <b>no earlier than the next iteration</b> — a floor, not a target. That is the whole reason
+        <code>setImmediate</code> exists: it trips rule 3, poll does not sleep, and check runs it on the
+        <i>current</i> lap.</p>
 
       <h3>What <code>server.listen(3000)</code> actually does</h3>
       <ol class="seq">
