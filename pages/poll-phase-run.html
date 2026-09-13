@@ -224,6 +224,8 @@
   .item.check{border-color:var(--check);color:var(--check)}
   .item.macro{border-color:var(--macro);color:var(--macro)}
   .item.uv{border-color:var(--uv);color:var(--uv)}
+  .item.pend{border-color:var(--kernel);color:var(--kernel)}
+  .chip.pend{color:var(--kernel);border-color:var(--kernel)}
   .item.next{background:var(--hl)}
   .item small{opacity:.65;margin-left:5px}
   .item .x{border:0;background:transparent;color:inherit;opacity:.45;padding:0 0 0 5px;font-size:12px;
@@ -506,8 +508,13 @@
     </div>
 
     <div class="card">
-      <h2>5 · Phases on either side <span>where poll's callbacks send work</span></h2>
+      <h2>5 · Phases on either side <span>pending and timers before · check after</span></h2>
       <div class="body">
+        <div class="q">
+          <div class="q-h"><i class="dot" style="background:var(--kernel)"></i><b>Pending queue</b>
+            <small>deferred I/O · runs before poll, next lap</small></div>
+          <div class="lane" id="q-pending"></div>
+        </div>
         <div class="q">
           <div class="q-h"><i class="dot" style="background:var(--macro)"></i><b>Timer heap</b>
             <small>setTimeout · previous phase</small></div>
@@ -787,7 +794,7 @@ function reset(seedFn){
   seq = 0;
   S = {
     now:0, lap:0, frozen:null, st:'lapstart',
-    inflight:[], ready:[], tick:[], micro:[], check:[], timers:[], closing:[],
+    inflight:[], ready:[], pending:[], tick:[], micro:[], check:[], timers:[], closing:[],
     stack:null, timeout:null, harvested:0,
     stopped:false, idleH:false, pendingQ:false,
     nTo:0, nImm:0, nTick:0, nMicro:0, nConn:0,
@@ -963,6 +970,27 @@ function seedWake(){
       'the same lap, and its <code>setTimeout(0)</code> not until the <b>next lap’s timers phase</b>. The loop ' +
       'then parks again on the server — press <b>client connects</b> to wake it the other way, through a real fd.'};
 }
+function seedRefused(){
+  // Two connects go out together. One is refused; one is a normal readable socket.
+  const bad = op('net.connect(9999) · no listener', 'kernel', 15, {});
+  bad.deferred = true;
+  bad.err = 'ECONNREFUSED';
+  bad.cb = "socket.on('error')";
+  submit(bad);
+  submit(op('socket fd 7 · read', 'kernel', 15, {}));
+
+  S.seedNote = {h:'the pending phase · a refused connect',
+    t:'Two kernel operations, both ready at <b>15 ms</b>, harvested by the <i>same</i> <code>epoll_wait</code> into ' +
+      'the <i>same</i> batch. Watch them diverge. <code>socket fd 7</code> dispatches normally, in <b>poll</b>, on ' +
+      'this lap. The refused connect does <b>not</b> — libuv has the event, but on many *nix systems it will not ' +
+      'report a connect error from inside poll. It calls <code>uv__io_feed()</code>, which pushes the watcher onto ' +
+      '<code>loop-&gt;pending_queue</code>, and your <code>error</code> handler waits a <b>whole lap</b> to run in ' +
+      'the <b>pending</b> phase — the phase almost every event-loop diagram leaves out. ' +
+      '<b>One thing to notice about the cascade:</b> rule 4 stays dark even here. <code>uv_run()</code> drains the ' +
+      'pending queue <i>before</i> it calls <code>uv_backend_timeout()</code>, so by the time poll asks how long to ' +
+      'sleep the queue is already empty. That rule only fires when something refills it late — a prepare ' +
+      'callback, or a pending callback queueing another. The switch in panel 1 is there for that narrow case.'};
+}
 function seedServer(){
   const o = op('server.listen(3000)', 'kernel', 1, {immediate:false});
   o.done = Infinity;              // a listening handle never completes
@@ -978,6 +1006,7 @@ const PRESETS = [
   ['Microtask starvation', seedMicroStarve],
   ['nextTick starvation', seedTickStarve],
   ['Woken by a worker', seedWake],
+  ['Refused connect',   seedRefused],
   ['Server at rest',   seedServer]
 ];
 
@@ -991,7 +1020,7 @@ function nextTimeout(){
 }
 function alive(){
   return S.inflight.length>0 || S.timers.length>0 || S.check.length>0 ||
-         S.ready.length>0 || S.closing.length>0;
+         S.ready.length>0 || S.pending.length>0 || S.closing.length>0;
 }
 function cascade(){
   const t = nextTimeout();
@@ -1011,7 +1040,7 @@ function cascade(){
           ' queued for <b>check</b>. Node keeps an active <b>idle handle</b> while immediates are pending, which trips this rule — '+
           'so poll returns <b>0</b> and falls straight through to the next phase. <b>This is the whole reason setImmediate beats setTimeout(…,0) from inside an I/O callback.</b>'
         : 'An active idle handle means "run me on every tick". If poll slept, those callbacks would stop firing, so the loop spins at full speed.' },
-    { hit:S.pendingQ, ms:0,
+    { hit:S.pendingQ || S.pending.length > 0, ms:0,
       lbl:'pending_queue not empty', sub:'callbacks deferred from the last iteration',
       why:'libuv deferred some callbacks to this iteration’s <b>pending</b> phase. They are due now, so poll must not sleep on the way there.' },
     { hit:S.closing.length>0, ms:0,
@@ -1040,6 +1069,7 @@ function phaseLabel(){
   switch(S.st){
     case 'lapstart': return S.lap === 0 ? null : 'timers';   // nothing is highlighted before the first lap
     case 'timers': return 'timers';
+    case 'pending': return 'pending';
     case 'timeout': case 'block': case 'harvest': case 'dispatch': case 'polldone': return 'poll';
     case 'check': return 'check';
     case 'close': case 'lapend': return 'close';
@@ -1168,11 +1198,26 @@ function phaseStep(){
           'This phase drains <i>every</i> timer that was already due, then poll gets its turn.' + tail(did));
         return true;
       }
-      S.st = 'timeout';
+      S.st = 'pending';
       note('timers done',
-        'No timer is due at the frozen clock. libuv walks through <b>pending</b> and <b>idle/prepare</b> — ' +
-        'usually empty — and arrives at <b>poll</b>. The first thing poll does is ask how long it is allowed to sleep.');
+        'No timer is due at the frozen clock. Next libuv checks its <b>pending queue</b> \u2014 I/O callbacks it ' +
+        'deliberately deferred out of a previous iteration \u2014 then it walks <b>idle/prepare</b> and arrives at <b>poll</b>.');
       return true;
+    }
+
+    case 'pending': {
+      if(S.pending.length){
+        const j = S.pending.shift();
+        const did = runCb(j, 'pending', 'pending');
+        note('pending phase \u00b7 the one most diagrams skip',
+          'Running <b>' + esc(j.label) + '</b>. This callback was <i>already known</i> during the <b>previous</b> ' +
+          'iteration\u2019s poll \u2014 the kernel had reported the fd \u2014 but libuv deliberately did not run it ' +
+          'there. It called <code>uv__io_feed()</code> to push the watcher onto <code>loop-&gt;pending_queue</code> ' +
+          'instead, and the callback waited a whole lap to be invoked here.' + tail(did));
+        return true;
+      }
+      S.st = 'timeout';
+      return phaseStep();     // nothing deferred: pending is a no-op, do not burn a step
     }
 
     case 'timeout': {
@@ -1238,10 +1283,18 @@ function phaseStep(){
 
     case 'harvest': {
       const done = S.inflight.filter(o => o.done <= S.now);
+      let deferred = 0;
       done.forEach(o => {
         S.inflight.splice(S.inflight.indexOf(o), 1);
-        S.ready.push(o);
-        logline('sys', 'poll', '   harvested: ' + o.label + '   (' + SRC[o.src].tag + ' → poll)');
+        if(o.deferred){
+          // libuv has the event, but will not invoke this callback inside poll.
+          S.pending.push({id:++seq, label:(o.err || 'deferred') + ' \u2192 ' + o.cb, sch:o.sch, from:o.label});
+          deferred++;
+          logline('sys', 'poll', '   ready, but DEFERRED: ' + o.label + '  \u2192 pending_queue (next iteration)');
+        } else {
+          S.ready.push(o);
+          logline('sys', 'poll', '   harvested: ' + o.label + '   (' + SRC[o.src].tag + ' \u2192 poll)');
+        }
       });
       S.harvested = done.length;
       S.st = 'dispatch';
@@ -1250,7 +1303,13 @@ function phaseStep(){
           ? '<code>epoll_wait</code> returned <b>' + done.length + '</b> ready event' + (done.length > 1 ? 's' : '') + '. ' +
             'They all arrive <b>together</b>, as one batch, and become queued callbacks. ' +
             'Note what this means for the rest of the phase: anything that finishes <i>after</i> this moment is ' +
-            '<b>not</b> in the batch and will not run this lap.'
+            '<b>not</b> in the batch and will not run this lap.' +
+            (deferred
+              ? ' <b>And ' + deferred + ' of them will not run even now.</b> libuv has the event, but for this class ' +
+                'of error it does not invoke the callback inside poll \u2014 it pushes the watcher onto ' +
+                '<code>pending_queue</code>, and the callback waits for the <b>pending</b> phase of the ' +
+                '<i>next</i> iteration. Watch the pending lane in panel 5.'
+              : '')
           : '<code>epoll_wait</code> returned with <b>nothing ready</b>. The batch is empty, so poll has no callbacks to ' +
             'dispatch and will fall through to the next phase.');
       return true;
@@ -1549,6 +1608,12 @@ function renderCascade(){
       '<span class="real">' + real + '</span></span><span class="sw"></span></div>').join('');
 }
 
+function deferChip(o){
+  return o.deferred
+    ? '<div class="chips"><i class="chip pend">' + esc(o.err || 'error') + ' \u2192 deferred to pending</i></div>'
+    : '';
+}
+
 function schChips(s){
   const out = [];
   if(s.tick)      out.push('<i class="chip tick">nextTick</i>');
@@ -1614,7 +1679,7 @@ function renderInflight(){
         '<span class="rm">' + rem + '</span>' +
         '<button class="x" data-del="' + o.id + '" title="cancel">×</button></div>' +
       '<div class="bar"><i style="width:' + pct + '%"></i></div>' +
-      schChips(o.sch) + '</div>';
+      deferChip(o) + schChips(o.sch) + '</div>';
   }).join('');
 }
 
@@ -1648,6 +1713,7 @@ function lane(id, arr, cls, empty, extra, del){
 }
 
 function renderQueues(){
+  lane('q-pending', S.pending, 'pend', 'nothing deferred', j => 'from ' + j.from);
   lane('q-tick',  S.tick,  'tick',  'empty', null, true);
   lane('q-micro', S.micro, 'micro', 'empty', null, true);
   lane('q-timers', S.timers.slice().sort((a, b) => a.due - b.due), 'macro', 'no timers',
