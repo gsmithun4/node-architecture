@@ -375,16 +375,32 @@
           <div class="q-h"><i class="dot" style="background:var(--tick)"></i><b>nextTick queue</b>
             <small>Node's own · drains first</small></div>
           <div class="lane" id="q-tick"></div>
+          <div class="q-add">
+            <span class="sig">process.nextTick( fn )</span>
+            <span class="gap"></span>
+            <button id="n-add">Schedule +</button>
+          </div>
         </div>
         <div class="q">
           <div class="q-h"><i class="dot" style="background:var(--micro)"></i><b>Microtask queue</b>
             <small>V8 owns it · drained fully</small></div>
           <div class="lane" id="q-micro"></div>
+          <div class="q-add">
+            <span class="sig">Promise.resolve().then( fn )</span>
+            <span class="gap"></span>
+            <button id="m-add">Schedule +</button>
+          </div>
         </div>
         <p class="note">
           These two are <b>not a phase</b>. They drain after the script, after <i>every single</i> callback, and
           between every phase transition. That is why callback B does not start until everything callback A
           queued has already run — and why a self-refilling chain here starves the loop completely.
+        </p>
+        <p class="note" style="margin-top:8px">
+          <b>Queue one by hand</b> and press <b>Step</b>: it runs immediately, ahead of whatever phase the loop
+          was about to do next. Note what does <i>not</i> happen — the cascade in panel 1 does not move.
+          Neither queue is a libuv handle, so <code>uv_backend_timeout()</code> has no rule for either one.
+          They are drained by <b>Node</b>, on the way into the loop, before libuv is ever asked how long to sleep.
         </p>
       </div>
     </div>
@@ -506,7 +522,7 @@ function reset(seedFn){
     inflight:[], ready:[], tick:[], micro:[], check:[], timers:[], closing:[],
     stack:null, timeout:null, harvested:0,
     stopped:false, idleH:false, pendingQ:false,
-    nTo:0, nImm:0,
+    nTo:0, nImm:0, nTick:0, nMicro:0,
     log:[], note:null, done:false
   };
   (seedFn || seedDefault)();
@@ -609,7 +625,8 @@ function logline(kind, phase, text){ S.log.push({kind, phase, text}); }
 
 function phaseLabel(){
   switch(S.st){
-    case 'lapstart': case 'timers': return 'timers';
+    case 'lapstart': return S.lap === 0 ? null : 'timers';   // nothing is highlighted before the first lap
+    case 'timers': return 'timers';
     case 'timeout': case 'block': case 'harvest': case 'dispatch': case 'polldone': return 'poll';
     case 'check': return 'check';
     case 'close': case 'lapend': return 'close';
@@ -931,6 +948,30 @@ function addImmediate(){
   render();
 }
 
+function addTick(){
+  S.tick.push({id:++seq, label:'nextTick #' + (++S.nTick)});
+  S.done = false;
+  logline('tickl', null, '+ process.nextTick(fn)  \u2192 nextTick queue');
+  note('process.nextTick scheduled',
+    'Queued in <b>Node\u2019s own</b> nextTick queue \u2014 neither V8 nor libuv knows it exists. Press <b>Step</b> and it ' +
+    'runs <i>immediately</i>, ahead of any microtask and ahead of whatever the loop was about to do next. ' +
+    'And notice panel 1 did not move: there is no cascade rule for this queue, because it is not a handle. ' +
+    'Node drains it on the way into the loop, before <code>uv_backend_timeout()</code> is ever consulted.');
+  render();
+}
+
+function addMicro(){
+  S.micro.push({id:++seq, label:'promise #' + (++S.nMicro) + ' \u2192 .then'});
+  S.done = false;
+  logline('microl', null, '+ Promise.resolve().then(fn)  \u2192 microtask queue');
+  note('microtask scheduled',
+    'Queued in <b>V8\u2019s</b> microtask queue. Node decides <i>when</i> to tell V8 to empty it, but the queue itself ' +
+    'belongs to the engine. It drains at the next boundary \u2014 after the nextTick queue, and completely: anything ' +
+    'queued during the drain joins the same drain. That is the mechanism behind a promise chain freezing the ' +
+    'loop for good.');
+  render();
+}
+
 function removeQueued(arr, id, what){
   const j = arr.find(x => x.id === id);
   if(!j) return;
@@ -1067,8 +1108,8 @@ function lane(id, arr, cls, empty, extra, del){
 }
 
 function renderQueues(){
-  lane('q-tick',  S.tick,  'tick',  'empty');
-  lane('q-micro', S.micro, 'micro', 'empty');
+  lane('q-tick',  S.tick,  'tick',  'empty', null, true);
+  lane('q-micro', S.micro, 'micro', 'empty', null, true);
   lane('q-timers', S.timers.slice().sort((a, b) => a.due - b.due), 'macro', 'no timers',
     t => 'due ' + t.due + 'ms' + (S.frozen !== null && t.due > S.frozen ? ' · next lap' : ''), true);
   lane('q-check', S.check, 'check', 'no setImmediate pending', null, true);
@@ -1151,6 +1192,18 @@ $('condtoggles').addEventListener('keydown', e => {
   e.preventDefault();
   S[t.dataset.cond] = !S[t.dataset.cond];
   render();
+});
+
+$('n-add').addEventListener('click', addTick);
+$('m-add').addEventListener('click', addMicro);
+
+$('q-tick').addEventListener('click', e => {
+  const b = e.target.closest('[data-qdel]');
+  if(b) removeQueued(S.tick, +b.dataset.qdel, 'nextTick');
+});
+$('q-micro').addEventListener('click', e => {
+  const b = e.target.closest('[data-qdel]');
+  if(b) removeQueued(S.micro, +b.dataset.qdel, 'Microtask');
 });
 
 $('t-add').addEventListener('click', () => {
