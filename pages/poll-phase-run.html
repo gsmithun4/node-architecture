@@ -808,6 +808,28 @@ function seedStarve(){
       'Meanwhile <code>socket fd 7</code> lands at <b>10 ms</b>, untouched: the kernel is watching it and no ' +
       'thread is involved. <b>Raise UV_THREADPOOL_SIZE below and the stall disappears.</b>'};
 }
+function seedMicroStarve(){
+  // Everything below is ready to run. None of it will.
+  submit(op("fs.readFile('data.json')", 'pool', 10, {}));
+  S.check.push({id:++seq, label:'setImmediate #1', sch:freshSch()});
+  S.timers.push({id:++seq, label:'setTimeout 0ms', due:1, sch:freshSch()});
+  // One promise whose .then queues another .then, forever.
+  S.micro.push({id:++seq, label:'promise .then #1', refill:12, gen:1});
+
+  S.seedNote = {h:'microtask starvation',
+    t:'Four things are waiting: a <b>timer</b>, a <b>setImmediate</b>, a <b>file read</b> that will be done in 10 ms, ' +
+      'and <b>one promise</b>. Press <b>Step</b> and watch the clock — it never moves, and the lap counter never ' +
+      'reaches 1. <code>.then #1</code> queues <code>.then #2</code> <i>before it returns</i>, so V8’s queue is ' +
+      'never empty at the boundary, and Node will not hand control back to libuv until it is. The loop never starts. ' +
+      'Nothing here saves you: the timer is due, the immediate is queued, the I/O is finished, and none of them run. ' +
+      '<b>A real chain has no end</b> — this one gives up after 12 so you can see what the loop does next. ' +
+      'Note the contrast with a recursive <code>setTimeout</code>: that lands in a <i>later lap</i> each time, so the ' +
+      'loop keeps turning. <code>process.nextTick</code> does starve, and it drains even earlier than this. ' +
+      '<b>One caveat on the recovery:</b> when the chain ends you will see the immediate run before the timer. ' +
+      'Scheduled from the <i>main script</i> like this, that race is genuinely nondeterministic in real Node \u2014 it ' +
+      'turns on whether the first lap begins before 1 ms has elapsed. The ordering is only <i>guaranteed</i> when ' +
+      'both are scheduled from inside an I/O callback.'};
+}
 function seedServer(){
   const o = op('server.listen(3000)', 'kernel', 1, {immediate:false});
   o.done = Infinity;              // a listening handle never completes
@@ -820,6 +842,7 @@ const PRESETS = [
   ['Immediate wins',   seedImmediate],
   ['One batch, 4 cbs', seedBatch],
   ['Pool starvation',  seedStarve],
+  ['Microtask starvation', seedMicroStarve],
   ['Server at rest',   seedServer]
 ];
 
@@ -920,6 +943,26 @@ function runCb(job, kindLabel, phase){
   return did;
 }
 
+/* A job that queues its own successor before returning. Real chains have no
+   counter; `left` exists only so the page stays usable. */
+function refill(j, queue, kind, logKind){
+  if(!j.refill) return null;
+  const gen = (j.gen || 1) + 1;
+  const left = j.refill - 1;
+  queue.push({id:++seq, label:kind + ' #' + gen, refill:left, gen});
+  logline(logKind, phaseLabel(), '   + queued ' + kind + ' #' + gen + '  → joins the SAME drain');
+  return {gen, left};
+}
+
+function starveTail(what, again){
+  return ' <b>And there it goes again:</b> before returning it queued <b>#' + again.gen + '</b>, so the queue is ' +
+    'not empty at this boundary and libuv still does not get a turn. ' +
+    (again.left > 0
+      ? 'The clock has not moved and the loop has not reached lap 1. <b>' + again.left + '</b> more before this ' +
+        'demo gives up — a real ' + what + ' chain has no such limit.'
+      : '<b>That was the last one.</b> The next drain finds the queue empty, and the loop finally gets to move.');
+}
+
 function step(){
   if(S.done) return false;
 
@@ -939,9 +982,11 @@ function step(){
     const j = S.tick.shift();
     S.stack = {label:j.label, kind:'tick'};
     logline('tickl', phaseLabel(), '▸ tick ' + j.label);
+    const again = refill(j, S.tick, 'nextTick', 'tickl');
     note('drain nextTick',
       'Running <b>' + esc(j.label) + '</b> from the <b>nextTick queue</b>. This is Node’s own queue — neither V8 nor ' +
-      'libuv knows it exists. It drains <i>completely</i>, and ahead of promises, before anything else may run.');
+      'libuv knows it exists. It drains <i>completely</i>, and ahead of promises, before anything else may run.' +
+      (again ? starveTail('nextTick', again) : ''));
     return true;
   }
 
@@ -950,12 +995,15 @@ function step(){
     const j = S.micro.shift();
     S.stack = {label:j.label, kind:'micro'};
     logline('microl', phaseLabel(), '▸ micro ' + j.label);
+    const again = refill(j, S.micro, 'promise .then', 'microl');
     note('drain microtasks',
       'Running <b>' + esc(j.label) + '</b> from <b>V8’s microtask queue</b>. Node just told V8 to empty it. ' +
-      'Jobs queued <i>during</i> this drain join the same drain — which is exactly why an endlessly self-queueing ' +
-      'promise chain can freeze the loop for good.');
+      'Jobs queued <i>during</i> this drain join the same drain.' +
+      (again ? starveTail('microtask', again)
+             : ' Nothing new was queued, so this drain can finally end.'));
     return true;
   }
+
 
   /* 4 — the phase machine */
   return phaseStep();
